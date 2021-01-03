@@ -1,0 +1,491 @@
+use core
+use array
+use macro
+use map
+use ref
+use sys
+use scope
+use str
+use parsec
+use ast
+use test
+
+// type Type =
+//     | TypeVar Number
+//     | TypeGen Number Type
+//     | TypeApp Type Type
+//     | TypeStruct (Map {String, Type})
+//     | TypeMod (Map {String, Type})
+//     | Type String
+
+// // e.g.
+// //   a -> f b
+// //   TypeApp (TypeApp (Type "->") (TypeVar 0)) (TypeApp (TypeVar 2) (TypeVar 1))
+
+
+// type TypeEnv = {
+//     path: List String,
+//     local: Map String Type
+//     global: Map String Type
+// }
+
+// type TypeCheck a = TypeCheck (TypeEnv -> Either String {TypeEnv, a})
+
+module namespace =
+
+    let func_type a b c =
+        AppType {AppType {Type "->", a}, AppType {AppType {Type "->", b}, c}}
+
+    let _default_type_env =
+        ModuleType <| map.from_array [
+            ["true", Type "Boolean"],
+            ["false", Type "Boolean"],
+            ["null", Type "Null"],
+            ["<|", func_type (VarType 0) (VarType 1) (VarType 2)],
+            ["|>", func_type (VarType 0) (VarType 1) (VarType 2)],
+            ["<<", func_type (VarType 0) (VarType 1) (VarType 2)],
+            [">>", func_type (VarType 0) (VarType 1) (VarType 2)],
+            ["&&", func_type (VarType 0) (VarType 1) (VarType 2)],
+            ["||", func_type (VarType 0) (VarType 1) (VarType 2)],
+            ["==", func_type (VarType 0) (VarType 1) (VarType 2)],
+            ["!=", func_type (VarType 0) (VarType 1) (VarType 2)],
+            ["<=", func_type (VarType 0) (VarType 1) (VarType 2)],
+            [">=", func_type (VarType 0) (VarType 1) (VarType 2)],
+            ["<", func_type (VarType 0) (VarType 1) (VarType 2)],
+            [">", func_type (VarType 0) (VarType 1) (VarType 2)],
+            ["+", func_type (VarType 0) (VarType 1) (VarType 2)],
+            ["-", func_type (VarType 0) (VarType 1) (VarType 2)],
+            ["*", func_type (VarType 0) (VarType 1) (VarType 2)],
+            ["/", func_type (VarType 0) (VarType 1) (VarType 2)]
+        ]
+
+    // : {} -> TypeEnv
+    let new {} = {
+        [],
+        _default_type_env,
+        _default_type_env
+    }
+
+    let _unwrap_module =
+        | ModuleType modules -> modules
+        | x -> sys.fail "Bad splines"
+
+    // Get the local `ModuleType` at the current `namespace` path.
+    // : TypeEnv -> Map {String, Type}
+    let get_module {namespace, local, global} =
+        namespace |> (array.foldr (_unwrap_module local) <| {m, name} -> do!
+            if! map.has name m then:
+                _unwrap_module <| map.get name m
+            else:
+                map.from_array [])
+
+    let get_global_module {namespace, local, global} =
+        namespace |> (array.foldr (_unwrap_module global) <| {m, name} -> do!
+            if! map.has name m then:
+                _unwrap_module <| map.get name m
+            else:
+                map.from_array [])
+
+    let reset_local {namespace, _, global} = 
+        {namespace, _default_type_env, global} 
+
+    let set_module new_mod {namespace, local, global} =
+        let _set_module {namespace, local} =
+            if! array.length namespace == 0 then:
+                ModuleType new_mod
+            else:
+                let name = array.get 0 namespace
+                if! map.has name (_unwrap_module local) then:
+                    let subtree =
+                        _set_module {array.drop 1 namespace, map.get name (_unwrap_module local)}
+                    ModuleType <| map.set name subtree (_unwrap_module local)
+                else:
+                    let subtree = 
+                        _set_module {array.drop 1 namespace, ModuleType <| map.from_array []}
+                    ModuleType <| map.set name subtree (_unwrap_module local)
+        {namespace, _set_module {namespace, local}, _set_module {namespace, global}}
+
+    let import_module name {namespace, local, global} =
+        let path = if! name == "core" then: [""] else: ["", name]
+        let mod = get_global_module {path, local, global}
+        let {_, local2, _} = set_module mod {path, local, global}
+        {namespace, local2, global}
+
+    let set_symbol symbol val ns =
+        let old_mod = get_module ns
+        let new_mod = map.set symbol val old_mod
+        set_module new_mod ns
+
+    // Resolve a symbol name from the current compilation position, and return both
+    // its fully qualified name and type.
+    // : String -> Namespace -> Option {Array String, Type}
+    let find_symbol name {namespace, local, global} =
+        let get ns_path local =
+            if! map.has name (_unwrap_module local) 
+            then:
+                let path_len = array.length namespace - array.length ns_path
+                let rel_name = array.take path_len namespace
+                let _type = map.get name (_unwrap_module local)
+                Some {rel_name, _type}
+            else: None {}
+
+        let find_rec ns_path local =
+            match! ns_path with:
+            | [] -> get ns_path local
+            | xs ->
+                let head = array.get 0 ns_path
+                let ns = (map.get head (_unwrap_module local))
+                match! find_rec (array.drop 1 ns_path) ns with:
+                    | None {} -> get ns_path local
+                    | x -> x
+
+        find_rec namespace local
+
+    let get {namespace, _, _} = 
+        str.join "." namespace
+
+    let push name {namespace, local, global} =
+        let newnamespace = array.push name namespace
+        {newnamespace, local, global}
+
+    let pop {namespace, local, global} =
+        {array.drop (-1) namespace, local, global}
+
+    let get_symbols x {_, local, global} = 
+        if! x == "core" then:
+            let mod = get_module {[""], local, global}
+            array.from_jsarray (js! "Array.from(" mod ".keys())")
+                |> array.filter (y -> y != "main" && (map.get y mod |> js! "(x => !(x[1] && x[1].toJS))"))
+        else:
+            [x]
+
+
+module _typecheck =
+
+    let uncheck (TypeCheck f) = f
+
+    let return x = TypeCheck <| s -> Right {s, x}
+
+    module dsl =
+
+        let bind f (TypeCheck p) = TypeCheck <| state ->
+            match! p state with:
+            | Right {state, x} -> uncheck (f x) state
+            | x -> x
+
+        let run = macro.monad <| quote! bind
+
+    let run = dsl.run
+
+    let import_module x = TypeCheck <| s ->
+        Right {namespace.import_module x s, {}}
+
+    let get_global = TypeCheck <| s -> Right {s, s}
+
+    let get x = TypeCheck <| s ->
+        match! namespace.find_symbol x s with:
+        | Some {_, z} -> Right {s, z}
+        | None {} -> Left <| str.str! "Unbound symbol `" x  "`" 
+        //"`\n" (match! s with: {_, ModuleType m} -> js! m ".toJS()")
+            
+    let set key x = TypeCheck <| state ->
+        Right <| {namespace.set_symbol key x state, {}}
+
+    // Creates a closed scope for variables defined in `tc`.
+    let with_scope tc = TypeCheck <| s ->
+        match! uncheck tc s with:
+        | Right {t, x} -> Right {s, x}
+        | x -> x
+
+    let check (TypeCheck x) = match! x (namespace.new {}) with:
+        | Right {_, x} -> x
+        | Left x -> sys.fail x
+
+    let join =
+        | [] -> return []
+        | xs -> dsl.run!
+            let x = array.get 0 xs
+            let y = join (array.drop 1 xs)
+            return <| array.concat [x] y
+
+    let fail x = TypeCheck <| _ -> Left x
+
+module typecheck =
+
+    let new_namespace = namespace.new
+    let push_namespace = namespace.push
+    let pop_namespace = namespace.pop
+    let get_namespace = namespace.get
+    let get_symbols = namespace.get_symbols
+    let find_symbol = namespace.find_symbol
+    let get_module = namespace.get_module
+    let reset_local = namespace.reset_local
+
+    let patt_type =
+        | Symbol x ->
+            _typecheck.set x (VarType "a")
+        | StructPattern [] -> _typecheck.return "Struct a"
+        | StructPattern xs ->
+            let (Pattern p) = array.get 0 xs
+            _typecheck.run!
+                patt_type p
+                patt_type (StructPattern (array.drop 1 xs))
+        | ListPattern [] -> _typecheck.return "List a"
+        | ListPattern xs ->
+            let (Pattern p) = array.get 0 xs
+            _typecheck.run!
+                patt_type p
+                patt_type (ListPattern (array.drop 1 xs))
+        | OrPattern [] -> _typecheck.return "a"
+        | OrPattern xs ->
+            let (Pattern p) = array.get 0 xs
+            _typecheck.run!
+                patt_type p
+                patt_type (OrPattern (array.drop 1 xs))
+        | AndPattern [] -> _typecheck.return "a"
+        | AndPattern xs ->
+            let (Pattern p) = array.get 0 xs
+            _typecheck.run!
+                patt_type p
+                patt_type (AndPattern (array.drop 1 xs))
+        | TagPattern {tag, Pattern patt} -> patt_type patt
+        | Number z -> _typecheck.return "Float64"
+        | String z -> _typecheck.return "String"
+        | z -> sys.fail <| str.str! "Unknown pattern " z 
+
+    let statement_type =
+        | Import (Symbol x) ->
+            _typecheck.import_module x
+        | Let {Pattern p, body} -> _typecheck.run!
+            patt_type p
+            _typecheck.with_scope <| statement_type body
+        | Statement [x] -> statement_type x
+        | Statement xs -> _typecheck.with_scope <| _typecheck.run!
+            statement_type <| array.get 0 xs
+            statement_type << Statement <| array.drop 1 xs
+        | Number n -> _typecheck.return <| Type "Number"
+        | String n -> _typecheck.return <| Type "String"
+        | Infix sym -> _typecheck.get sym
+        | Accessor {x, y} -> _typecheck.run!
+            let result = statement_type x
+            let {_, _, ModuleType g} = _typecheck.get_global
+            match! result with:
+            | ModuleType m ->
+                if! map.has y m then:
+                    _typecheck.return <| map.get y m
+                else:
+                    _typecheck.fail <| str.str! "Unknown symbol " (pprint.pprint <| Accessor {x, y})
+            | _ -> 
+                _typecheck.fail <| str.str! "Unknown symbol " (pprint.pprint <| Accessor {x, y})
+        | Macro {Symbol "quote", [x]} -> 
+            _typecheck.return {}
+            // _typecheck.with_scope <| statement_type x
+            // TODO figure out how to apply type checking to quotations
+            // sys.log "Untyped quotation"
+        | Macro {Symbol _, [x]} -> _typecheck.with_scope <| statement_type x
+        | Macro {Symbol x, xs} -> _typecheck.with_scope <| _typecheck.run!
+            statement_type <| array.get 0 xs
+            statement_type (Macro {Symbol x, array.drop 1 xs})
+
+        | Module {x, arg} ->
+            _typecheck.return {}
+        | Apply {f, x} -> _typecheck.run!
+            statement_type f
+            statement_type x
+        | Struct xs -> _typecheck.run!
+            _typecheck.join (array.map statement_type xs)
+            _typecheck.return "Struct a"
+        | List xs -> _typecheck.run!
+            _typecheck.join (array.map statement_type xs)
+            _typecheck.return "List a"
+        | Func {Pattern patt, body} -> _typecheck.with_scope <| _typecheck.run!
+            patt_type patt
+            statement_type body
+        | Case xs -> _typecheck.run!
+            _typecheck.join (array.map statement_type xs)
+            _typecheck.return "a"
+        | Export {Pattern patt, body} -> _typecheck.run!
+            patt_type patt
+            _typecheck.with_scope <| statement_type body
+        | Tag [name] -> _typecheck.return <| str.str! name " -> a"
+        | Symbol x -> 
+            _typecheck.get x
+        | x -> sys.fail <| str.str! "Unknown typecheck node `" x "`"
+
+    let check = _typecheck.check << statement_type
+
+    let verify x = do!
+        check x
+        x
+
+test.assert!
+    let new_mod = map.from_array [["add", "a -> a"], ["sub", "a -> a"]]
+    let mod = namespace.new {}
+        |> namespace.push "test"
+        |> namespace.set_module new_mod
+        |> namespace.get_module
+    map.get "add" mod == "a -> a"
+
+test.assert!
+    let top_mod = map.from_array [["top", "c -> c"]]
+    let new_mod = map.from_array [["add", "a -> a"], ["sub", "a -> a"]]
+    let type_ = namespace.new {}
+        |> namespace.set_module top_mod
+        |> namespace.push "test"
+        |> namespace.set_module new_mod
+        |> namespace.find_symbol "top"
+    match! type_ with:
+        | Some {_, "c -> c"} -> true
+        | _ -> false
+
+test.assert!
+    let top_mod = map.from_array [["top", "c -> c"]]
+    let new_mod = map.from_array [["add", "a -> a"], ["sub", "a -> a"]]
+    let type_ = namespace.new {}
+        |> namespace.set_module top_mod
+        |> namespace.push "test"
+        |> namespace.set_module new_mod
+        |> namespace.pop
+        |> namespace.find_symbol "top"
+    match! type_ with:
+        | Some {_, "c -> c"} -> true
+        | _ -> false
+
+test.assert!
+    let top_mod = map.from_array [["top", "c -> c"]]
+    let new_mod = map.from_array [["add", "a -> a"], ["sub", "a -> a"]]
+    let type_ = namespace.new {}
+        |> namespace.set_module top_mod
+        |> namespace.push "test"
+        |> namespace.set_module new_mod
+        |> namespace.pop
+        |> namespace.find_symbol "add"
+    match! type_ with:
+        | None {} -> true
+        | _ -> false
+
+// Test that `reset_local` removes `add` from scope
+test.assert!
+    let new_mod = map.from_array [["add", "a -> a"], ["sub", "a -> a"]]
+    let type_ = namespace.new {}
+        |> namespace.push "test"
+        |> namespace.set_module new_mod
+        |> namespace.pop
+        |> namespace.reset_local
+        |> namespace.find_symbol "test"
+    match! type_ with:
+        | None {} -> true
+        | _ -> false
+
+// Test that `import_module` re-adds `add` into scope
+test.assert!
+    let new_mod = map.from_array [["add", "a -> a"], ["sub", "a -> a"]]
+    let type_ = namespace.new {}
+        |> namespace.push ""
+        |> namespace.push "test"
+        |> namespace.set_module new_mod
+        |> namespace.pop
+        |> namespace.reset_local
+        |> namespace.import_module "test"
+        |> namespace.find_symbol "test"
+    match! type_ with:
+        | Some _ -> true
+        | _ -> false
+
+test.assert!
+    let mod = namespace.new {}
+        |> namespace.push "test"
+        |> namespace.push "a"
+        |> namespace.push "org"
+        |> namespace.get
+    mod == "test.a.org"
+
+test.assert!
+    let y = _typecheck.check <| _typecheck.run!
+        let x = TypeCheck <| s -> Right {s, 1}
+        _typecheck.return x
+    y == 1
+
+test.assert!
+    let y = _typecheck.check <| _typecheck.run!
+        _typecheck.set "test" "hello"
+        _typecheck.get "test"
+    y == "hello"
+
+test.assert!
+    let y = typecheck.check <| quote! 1
+    y == Type "Number"
+
+test.assert!
+    let y = typecheck.check <| quote! "test"
+    y == Type "String"
+
+test.skip!
+    let y = typecheck.check <| quote!
+        let x = 1
+        x
+    y == "Number"
+
+test.assert_fail!
+    typecheck.check <| quote!
+        let x = 1
+        y
+
+test.assert_fail!
+    typecheck.check <| quote!
+        let x =
+            let z = 1
+            z
+        z
+
+test.assert!
+    typecheck.check <| quote!
+        let x =
+            let z = 1
+            z
+        x
+
+test.assert_fail!
+    typecheck.check <| quote!
+        let x = y -> y
+        y
+
+test.assert!
+    typecheck.check <| quote!
+        let x = y -> y
+        x
+
+test.assert_fail!
+    typecheck.check <| quote!
+        module test =
+            let z = 1
+        z
+
+test.skip!
+    let y = typecheck.check <| quote!
+        module test =
+            let z = 1
+        test.z
+    sys.log y == "a"
+
+test.assert!
+    let y = typecheck.check <| quote!
+        let [x] = 1
+        x
+    y == VarType "a"
+
+test.assert!
+    let y = typecheck.check <| quote!
+        let {x} = 1
+        x
+    y == VarType "a"
+
+test.assert!
+    let y = typecheck.check <| quote!
+        let for_each x =
+            | Statement [Statement y] -> for_each x (Statement y)
+            | Statement [Func {x}] -> 1
+    y == "a"
+
+
+test.collect! {}

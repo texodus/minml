@@ -1,0 +1,122 @@
+use core
+use array
+use macro
+use ref
+use sys
+use str
+use term
+use compiler
+use typecheck
+use ast
+
+module index = 
+
+    // Parse input string to an `Expression` AST tree.
+    let wrap_module ast = 
+        Module {Symbol "", ast}
+
+    let opt_vars = js! "{
+            passes: 2,
+            unsafe: true,
+            toplevel: true,
+            pure_getters: true
+        }"
+
+    let minify opt x cont = 
+        call_later!
+        js! "cont(require('terser').minify(" x ", {
+            compress: opt_vars, 
+            mangle: opt, 
+            output: {
+                beautify: !opt
+            }
+        }).code)"
+
+    let re_require outfile code = 
+        js! "(() => {
+            const filename = require.resolve(require('path').resolve(outfile));
+            let Module = require('module');
+            var paths = Module._nodeModulePaths('./');
+            var parent = module.parent;
+            var m = new Module(filename, parent);
+            m.filename = filename;
+            m.paths = paths.concat([require('path').dirname(filename)]);
+            m._compile(code, filename);
+            parent && parent.children && parent.children.splice(parent.children.indexOf(m), 1);
+            require.cache[filename] = m;
+        })()"
+ 
+
+    // Build a filename and return a complete JS module as a `String`
+    let build out optimize infile = 
+        let _st_globals = js! "Object.assign({}, global)"
+
+        let body = 
+            try! infile 
+                |> sys.read_file 
+                |> ast.parse
+                |> wrap_module
+                |> compiler.compile
+            catch: e ->                
+                sys.fail <| str.str! "Failed " (term.red! infile) "\n\n" (js! "e.message || e")
+
+        ref.apply typecheck.reset_local compiler.ns
+
+        let macro_code = str.str! "
+            const STRUCT = 0;
+            const LIST = 1;
+            " body ";"
+
+        let mod_name = array.get (-1) <| js! "require('path').basename(infile).split('/')"
+
+        let outfile = 
+            js! "require('path').join(out, mod_name.replace('.minml', '.js'))"
+
+        re_require outfile macro_code
+
+        let file_code = str.str! macro_code ";if (typeof main !== 'undefined') main();"
+
+        minify optimize file_code <| output ->
+            sys.write_file outfile output
+
+            js! "{
+                for (const key of Object.keys(global)) {
+                    if (key in _st_globals) {
+                        global[key] = _st_globals[key];
+                    } else {
+                        delete global[key]
+                    }
+                }
+            }"
+
+            sys.log <| str.str! "Compiled " (term.green! outfile)
+
+let main {} =
+    let iter_build out optimize failed =
+        | [] -> {}
+        | xs ->
+            let infile = array.get 0 xs
+            if! failed then:
+                call_later! sys.log <| str.str! "Skipped " (term.blue! infile)
+                iter_build out optimize true (array.drop 1 xs)
+            else: 
+                try!
+                    index.build out optimize infile
+                    iter_build out optimize failed (array.drop 1 xs)
+                catch: e ->
+                    call_later! sys.log <| str.str! "\n" e "\n"
+                    iter_build out optimize true (array.drop 1 xs)
+
+    // TODO fool type checker
+    let bbuild out optimize args = args |> array.get 0 |> do!
+        | "-o" -> bbuild <| array.get 1 args <| optimize <| array.drop 2 args
+        | "--optimize" -> bbuild <| out <| true <| array.drop 1 args
+        | _ ->
+            if! array.length args == 0 then:
+                let pkg = sys.read_file "package.json"
+                let files = array.from_jsarray <| js! "JSON.parse(" pkg ").minml"
+                iter_build out optimize false  files
+            else: 
+                iter_build out optimize false args
+
+    bbuild "" false sys.argv

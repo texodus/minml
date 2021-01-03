@@ -1,0 +1,59 @@
+
+use core
+use array
+use macro
+use str
+use term
+
+module pprint =
+
+    let pprint_patt =
+        | Symbol x -> x
+        | OrPattern xs -> str.str! "(" (str.join " | " (array.map ((Pattern x) -> pprint_patt x) xs)) ")"
+        | AndPattern xs -> str.str! "(" (str.join " & " (array.map ((Pattern x) -> pprint_patt x) xs)) ")"
+        | TagPattern {tag, Pattern patt} -> str.str! "(" tag " " (pprint_patt patt) ")"
+        | StructPattern xs -> str.str! "{" (str.join ", " (array.map ((Pattern x) -> pprint_patt x) xs)) "}"
+        | ListPattern xs -> str.str! "[" (str.join ", " (array.map ((Pattern x) -> pprint_patt x) xs)) "]"
+        | Number z -> z
+        | String z -> str.stringify z
+        | x -> str.inspect x 
+    
+    let get_sep depth =
+        str.str! "\n" (str.repeat (depth * 4) " ")
+
+    let indent _pprint depth xs = 
+        let sep = get_sep depth
+        str.str! sep (str.join sep (array.map (_pprint (depth + 1)) xs))
+
+    let _pprint depth =
+        | Import x -> str.str! "use " (_pprint depth x)
+        | Module {x, Statement xs} ->
+            let sep = get_sep depth
+            str.str! "module " (_pprint depth x) " =" sep (indent _pprint depth xs)
+        | Accessor {x, y} -> str.str! (_pprint depth x) "." y
+        | Apply {Apply {Infix x, y}, z} -> str.str! "(" (_pprint depth y) " " x " " (_pprint depth z) ")"
+        | Apply {f, x} -> str.str! (_pprint depth f) " " (_pprint depth x)
+        | Macro {x, y} -> str.str! (_pprint depth x) "! " (str.join " : " <| array.map (_pprint depth) y)
+        | Statement [xs] -> _pprint depth xs
+        | Statement xs ->
+            let sep = get_sep depth
+            indent _pprint depth xs
+        | Struct xs -> str.str! "{" (str.join ", " (array.map (_pprint depth) xs)) "}"
+        | List xs -> str.str! "[" (str.join ", " (array.map (_pprint depth) xs)) "]"
+        | Case xs ->
+            let sep = get_sep depth
+            str.str! sep (str.join sep <| array.map (x -> str.str! "| " (_pprint (depth + 1) x)) xs)
+        | Func {Pattern patt, body} -> str.str! (pprint_patt patt) " -> " (_pprint depth body)
+        | String x -> str.stringify x
+        | Tag [x] -> x
+        | Export x -> str.str! (_pprint depth <| Let x)
+        | Let {Pattern x, y} -> str.str! "let " (pprint_patt x) " = " (_pprint depth y)
+        | Symbol x -> x
+        | Number x -> x
+        | x -> str.inspect x
+
+    let pprint = 
+        _pprint 0
+
+    let tprint x = 
+        str.str! "    " (_pprint 4 x)

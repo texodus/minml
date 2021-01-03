@@ -1,0 +1,14 @@
+use core
+use macro
+use str
+
+// Terminal utilities
+module term =
+    let _color color x = quote! str.str! 
+        "\u001b[" (unquote! String color) "m" (unquote! str.str x) "\u001b[0m"
+
+    let red = _color "31"    
+    let green = _color "32"
+    let yellow = _color "33"
+    let blue = _color "34"
+

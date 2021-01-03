@@ -1,0 +1,480 @@
+use core
+use scope
+use array
+use macro
+use ref
+use str
+use sys
+use set
+use term
+use pprint
+use test
+use typecheck
+
+// type Expression =
+//     | Statement [Expression]
+//     | Symbol String
+//     | String String
+
+// type Pattern =
+//     | StructPattern [Pattern]
+//     | TagPattern {String, Pattern}
+//     | ListPattern [Pattern]
+
+module js =
+
+    // A specialized `str.str` macro which eliminates concurrent whitespace
+    // from block-level string literals.  Useful for minimizable output when
+    // encoding whitespace-naive JavaScript as a DSL.
+    let expr x =
+        let fix =
+            | Statement [x] -> Statement [fix x]
+            | String z -> String (js! z ".replace(/[ \\r\\t\\n]+/gm, ' ')")
+            | z -> z
+        let (List q) = macro.vector x
+        str.str <| Statement (array.map fix q)
+
+module compiler =
+
+    let ns = ref.new <| typecheck.new_namespace {}
+
+    // A ref which generates new unique variable names.
+    let genid =
+        let idref = ref.new 0
+        {} ->
+            let id = ref.get idref
+            ref.set (id + 1) idref
+            str.str! "VAR_" id
+
+    module pattern =
+        let subterm sym f {x, i} =
+            let z = js.expr! sym "[" (i + 1) "]"
+            f z x
+
+        // Compile pattern bindings that in a function's lexical scope.
+        let compile_bind sym (Pattern p) = match! p with:
+            | Symbol "_" -> ""
+            | Symbol x -> js.expr! "const " x " = " sym
+            | TagPattern {tag, patt} -> compile_bind (js.expr! sym "[1]") patt
+            | AndPattern xs -> xs 
+                |> array.map (compile_bind sym)
+                |> str.join "; "
+            | OrPattern xs -> sys.fail "Not Implemented"
+            | StructPattern xs -> xs 
+                |> array.mapi (subterm sym compile_bind)
+                |> str.join "; "
+            | ListPattern xs -> xs
+                |> array.mapi (subterm sym compile_bind)
+                |> str.join "; "
+            | Number z -> ""
+            | String z -> ""
+            | z -> sys.log (str.str! "Unknown pattern binding AST node " (str.inspect z))
+
+
+        // Compile pattern bindings that are at the top-level of a Module.
+        let compile_export sym (Pattern p) = match! p with:
+            | Symbol x -> js.expr! 
+                "const " x " = /*__PURE__*/ " sym ";
+                exports." x " = /*__PURE__*/ " x
+            | StructPattern xs -> xs 
+                |> array.mapi (subterm sym compile_export) 
+                |> str.join "; "
+            | _ -> compile_bind sym (Pattern p)
+
+        // Compile pattern conditionals in a function argument.
+        let compile_cond sym (Pattern p) = match! p with:
+            | Symbol _ -> 
+                "true"
+            | StructPattern xs -> 
+                str.join " && " (array.mapi (subterm sym compile_cond) xs)
+            | AndPattern xs ->
+                str.join " && " <| array.map (compile_cond sym) xs
+            | OrPattern xs ->
+                str.join " || " <| array.map (compile_cond sym) xs
+            | ListPattern xs ->
+                let length_check = [js.expr! sym ".length - 1 === " (array.length xs)]
+                let subpatterns = array.mapi (subterm sym compile_cond) xs
+                str.join " && " (array.flat [length_check, subpatterns])
+            | TagPattern {tag, patt} -> 
+                let tag_cond = js.expr! (str.stringify tag) " === " sym "[0]"
+                let param_cond = compile_cond (js.expr! sym "[1]") patt
+                str.join " && " (array.filter (x -> x != "") [tag_cond, param_cond])
+            | Number z -> 
+                js.expr! sym " === " z
+            | String z -> 
+                js.expr! sym " === " (str.stringify z)
+            | z -> 
+                sys.log (str.str! "Unknown pattern conditional AST node " (str.inspect z))
+
+    module macro_ = 
+
+        // Compile pattern bindings that in a function's lexical scope.
+        // : Set String -> Pattern -> Set String
+        let get_symbols s (Pattern p) = match! p with:
+            | Symbol x -> set.add x s
+            | TagPattern {tag, patt} -> get_symbols s patt
+            | StructPattern xs -> array.foldr s ({s, p} -> set.union s (get_symbols s p)) xs
+            | ListPattern xs -> array.foldr s ({s, p} -> set.union s (get_symbols s p)) xs
+            | Number _ -> s
+            | String _ -> s
+            | z -> sys.log (str.str! "Unknown macro pattern " (str.inspect z))
+
+        let _recurse_expr rec =
+            | Macro {Symbol x, arg} -> Macro {Symbol x, array.map rec arg}
+            | Module {x, arg} -> Module {x, rec arg}
+            | Apply {f, x} -> Apply {rec f, rec x}
+            | Statement xs -> Statement (array.map rec xs)
+            | Struct xs -> Struct (array.map rec xs)
+            | List xs -> List (array.map rec xs)
+            | Func {patt, body} -> Func {patt, rec body}
+            | Case xs -> Case (array.map rec xs)
+            | Export {patt, body} -> Export {patt, rec body}
+            | Let {patt, body} -> Let {patt, rec body}
+            | Tag [name] -> Tag [name]
+            | x -> x
+
+        let map_free s f =
+            | Statement [x] -> Statement [map_free s f x]
+            | Statement xs -> 
+                match! array.get 0 xs with:
+                | Let {patt, expr} ->
+                    let t = get_symbols s patt
+                    let (Statement zs) = map_free t f (Statement (array.drop 1 xs))
+                    Statement <| array.unshift (Let {patt, map_free t f expr}) zs
+                | x -> 
+                    let (Statement zs) = map_free s f (Statement (array.drop 1 xs))
+                    Statement <| array.unshift (map_free s f x) zs
+            | Func {patt, expr} ->
+                let t = get_symbols s patt
+                Func {patt, map_free t f expr}
+            | Symbol x ->
+                if! set.has x s then:
+                    Symbol x
+                else:
+                    f x
+            | Accessor {x, y} ->
+                Accessor {map_free s f x, y}
+            | x -> 
+                _recurse_expr (map_free s f) x
+
+        let _clean =
+            | Apply {Apply {Infix "|>", x}, Func {patt, body}} -> 
+                Statement [Let {patt, _clean x}, _clean body]
+            | Apply {Statement [Func {patt, body}], x} ->
+                Statement [Let {patt, _clean x}, _clean body]
+            | List [Statement [x]] -> _clean <| List [x]
+            | Struct [Statement [x]] -> _clean <| Struct [x]
+            | Statement [Func x] -> _clean <| Func x
+            | Statement [Statement xs] -> _clean <| Statement xs
+            | x -> _recurse_expr _clean x
+
+            // | Apply {Apply {Infix "<|", Func {patt, body}}, x} -> 
+            //     sys.log "Apply reverse decompose"
+            //     Statement [Let {patt, _clean x}, _clean body]
+            // | Apply {Apply {Infix "<|", Statement [Func {patt, body}]}, x} -> 
+            //     // sys.log "Apply reverse decompose 2"
+            //     Statement [Let {patt, _clean x}, _clean body]
+            // | Apply {Apply {Infix "|>", x}, Statement [Func {patt, body}]} -> 
+            //     // sys.log "Apply decompose 2"
+            //     Statement [Let {patt, _clean x}, _clean body]
+
+        let _expand compile = 
+            | Macro {Symbol "unquote", arg} ->
+                Macro {Symbol "unquote", array.map (_expand compile) arg}
+            | Macro {Symbol "js", arg} ->
+                Macro {Symbol "js", array.map (_expand compile) arg}
+            | Macro {Symbol "quote", arg} ->
+                Macro {Symbol "quote", array.map (_expand compile) arg}
+            | Macro {x, arg} ->
+                try!
+                    let mac = x |> compile |> scope.run_empty_scope
+                    let expanded = array.foldr mac ({f, x} -> f x) arg
+                    _expand compile <| scope.run_empty_scope expanded
+                catch: e ->
+                    let mac_name = pprint.pprint x
+                    // TODO only prints the first macro argument to prevent logspam
+                    let mac_code = pprint.tprint <| array.get 0 arg
+                    sys.log <| str.str! 
+                        (term.red! " X") " Error in macro `" mac_name "`:\n"
+                        mac_code "\n"
+                    sys.fail e
+            | Module x -> Module x
+            | x -> _recurse_expr (_expand compile) x
+
+        let _z x =
+            let {nam, _} = ref.get ns
+            match! typecheck.find_symbol x (ref.get ns) with:
+                | Some {ns_path, _} ->
+                    let path = ns_path |> array.drop 1 |> array.push x
+                    let head = array.get 0 path
+                    let ppath = array.foldr (Symbol head) ({x, y} -> Accessor {x, y}) (array.drop 1 path)
+                    ppath
+                | None {} ->
+                    sys.log <| str.str! " " (term.yellow! "?") " Unresolved macro symbol `" x "`"
+                    Symbol x
+
+        let expand compile = _expand compile >> _clean
+
+        let _preserve compile =
+            | Macro {Symbol "unquote", [arg]} -> str.str! ">>>" (compile arg) "<<<"
+            | x -> _recurse_expr (_preserve compile) x
+
+        let preserve compile =
+            _preserve compile >> map_free (set.from_array []) _z
+
+        let unpreserve x = js!
+            x ".replace(
+                /\">>>(.+?)<<<\"/gm,
+                (_, " x ") => scope.run_empty_scope('\"' + " x " + '\"')
+            )"
+
+        let compile_js compile = 
+            | Statement [Apply {f, y}] ->
+                let p = compile_js compile (Statement [f])
+                let q = compile_js compile (Statement [y])
+                js.expr! p " " q
+            | Statement [String z] -> 
+                js! z ".replace(/[ \\r\\t\\n]+/gm, ' ')"
+            | Statement [z] -> 
+                compile z
+            | Statement z ->
+                let p = compile_js compile (Statement [array.get 0 z])
+                let q = compile_js compile (Statement (array.drop 1 z))
+                js.expr! p " " q
+            | x -> 
+                sys.fail (str.inspect x)
+    
+    let convert_to_module ast =
+        let exp =
+            | Statement xs -> Statement (array.map exp xs)
+            | Let x -> Export x
+            | x -> x
+        array.map exp ast        
+
+    let compile_line compile name z =
+        let expanded = 
+            try!
+                macro_.expand compile z
+            catch: e ->
+                sys.log <| str.str! 
+                    (term.red! " X") " Error in expansion in `" name "`"
+                sys.fail e
+
+        try!
+            let (TypeCheck x) = typecheck.statement_type expanded
+            let _ns = ref.get ns
+            match! x _ns with:
+                | Right {__ns, x} ->
+                    ref.set __ns ns
+                    x
+                | Left x ->
+                    sys.log <| str.str! " " (term.yellow! "?") " " x " in module `" name "`\n"
+                    sys.log <| pprint.tprint z
+                    sys.log ""
+        catch: e ->
+            sys.log <| str.str! " " (term.yellow! "?") " " (js! "e.message || e")  " in module `" name "`"
+
+        try!
+            let compiled = compile expanded
+            compiled
+        catch: e ->
+            sys.log <| str.str! (term.red! " X") " Error in module `" name "`"
+            sys.fail e
+
+    let compile =
+        // optimizations
+        | Export {Pattern (Symbol sym), Func {patt, body}} ->
+            let new_var = genid {}
+            let cond_ = pattern.compile_cond new_var patt
+            let bind = js.expr!
+                (pattern.compile_bind new_var patt) ";
+                return " (compile body) ";"
+
+            let js_cond x body = 
+                js.expr! "if (" x ") { " body "; }"            
+
+            let js_export inner = js.expr!
+                "function " sym "(" new_var ") {
+                    " inner ";
+                }
+                exports." sym " = " sym ";"
+
+            js_export <| sys.cond! 
+                str.length cond_ > 0 && cond_ != "true"
+                js_cond cond_ bind
+                bind
+
+        | Export {Pattern (Symbol sym), body} -> js.expr! 
+            "const " sym " = /*__PURE__*/ " (compile body) ";
+            exports." sym " = /*__PURE__*/ " sym ";"
+        | Let {Pattern (Symbol sym), body} -> js.expr!
+            "const " sym " = /*__PURE__*/ "  (compile body)
+
+        // Real
+        | Module {Symbol name, Statement xs} ->    
+            ref.apply (typecheck.push_namespace name) ns
+            let compiled = xs 
+                |> convert_to_module 
+                |> array.map (compile_line compile name)
+                |> str.join "; "
+            ref.set (typecheck.pop_namespace (ref.get ns)) ns
+            scope.capture_empty_scope name compiled
+            match! name with:
+                | "" -> compiled
+                | name -> js.expr! "
+                    const " name " = /*__PURE__*/ exports [" (str.stringify name) "] =
+                        /*__PURE__*/ (function() {
+                            const exports = /*__PURE__*/ {};
+                            " compiled ";
+                            return exports;
+                        })();"
+
+        | Export {patt, body} ->
+            let new_var = genid {}
+            let cond_ = pattern.compile_cond new_var patt
+            let bind = pattern.compile_export new_var patt
+            js.expr! 
+                "const " new_var " = /*__PURE__*/ " (compile body) ";
+                if (!(" cond_ ")) { 
+                    sys.fail('Import binding failed'); 
+                } 
+                " bind ";"
+
+        | Import (Symbol x) ->
+            let keys = ref.get ns |> typecheck.get_symbols x 
+            let v = genid {}
+
+            let stmts = keys |> (array.map <| key -> js.expr!
+                "global[" (str.stringify key) "] = " v "." key ";")
+
+            let compiled = js.expr!
+                "const " v " = require('./" x ".js');"
+                (str.join "; " stmts)
+
+            scope.run_empty_scope compiled
+
+            let stmts_ = 
+                let bind key = js.expr!
+                    "const " key " = " v "." key
+                array.map bind keys
+
+            js.expr!
+                "const " v " = /*__PURE__*/ require('./" x ".js');"
+                (str.join "; " stmts_)
+
+        | Symbol x -> x
+        | Accessor {x, y} -> js.expr! (compile x) "." y
+        | Number x -> x
+        | String x -> str.stringify x
+        | List xs -> js.expr! "[LIST, " (str.join ", " (array.map (compile) xs)) "]"
+        | Struct xs -> sys.cond! 
+            array.length xs > 0
+            js.expr! "[STRUCT, " (xs |> array.map compile |> str.join ", ") "]"
+            "[STRUCT]"
+        | Func {patt, body} ->
+            let new_var = genid {}
+            let cond_ = pattern.compile_cond new_var patt
+            let bind = pattern.compile_bind new_var patt
+            let cc = compile body
+            
+            if! str.length cond_ > 0 && cond_ != "true"
+            then: js.expr! 
+                "(" new_var ") => {
+                    if (" cond_ ") {
+                        " bind ";
+                        return " cc ";
+                    }
+                }"
+            else: js.expr! 
+                "(" new_var ") => {
+                    " bind ";
+                    return " cc ";
+                }"
+
+        | Tag xs -> js.expr! "(x => [" (str.stringify <| array.get 0 xs) ", x])"
+        | Macro {Symbol "js", [arg]} -> macro_.compile_js compile arg
+        | Macro {Symbol "unquote", [arg]} ->
+            sys.fail "`unquote!` macro used outside of quotation context"
+        | Macro {Symbol "quote", [arg]} ->
+            macro_.unpreserve (str.stringify (macro_.preserve compile arg))    
+        | Apply {Apply {Infix ">>", x}, y} -> 
+            let new_var = genid {}
+            js.expr! 
+                "((" new_var ") => { 
+                    return (" (compile y) ")((" (compile x) ")(" new_var "));
+                })"
+        | Apply {Apply {Infix "<<", x}, y} -> 
+            let new_var = genid {}
+            js.expr! 
+                "((" new_var ") => { 
+                    return (" (compile x) ")((" (compile y) ")(" new_var "));
+                })"
+        | Apply {Apply {Infix "<|", x}, y} -> 
+            js.expr! "/*@__INLINE__*/ (" (compile x) ")(" (compile y) ")"
+        | Apply {Apply {Infix "|>", x}, y} -> 
+            js.expr! "(" (compile y) ")(" (compile x) ")"
+        | Apply {Apply {Infix "==", x}, y} -> 
+            js.expr! "eq(" (compile y) " , " (compile x) ")"
+        | Apply {Apply {Infix op, x}, y} -> 
+            js.expr! (compile x) op (compile y)
+        | Apply {f, x} ->
+            js.expr! "(" (compile f) ")(" (compile x) ")"
+        | Statement [x] -> compile x
+        | Statement xs ->
+            let acc =
+                | Statement xs -> array.flatmap acc xs
+                | x -> [compile x]
+            let stmts = array.flatmap acc xs
+            let terms = array.concat (array.drop (-1) stmts) [js.expr! "return " (array.get (-1) stmts)]
+            js.expr! "(() => { 
+                " (str.join "; " terms) "
+            })()"
+
+        | Let {patt, body} ->
+            let new_var = genid {}
+            let cond_ = pattern.compile_cond new_var patt
+            let bind = pattern.compile_bind new_var patt
+            js.expr!
+                "const " new_var " = /*__PURE__*/ " (compile body) ";
+                if (!(" cond_ ")) { 
+                    sys.fail('Let binding failed'); 
+                }
+                " bind
+
+        | Case xs ->
+            let new_var = genid {}
+            let acc (Func {patt, body}) =
+                let cond_ = pattern.compile_cond new_var patt
+                let bind = pattern.compile_bind new_var patt
+                js.expr! "
+                    if (" cond_ ") {
+                        " bind ";
+                        return " (compile body) ";
+                    }"
+            js.expr! "(" new_var ") => {
+                " (str.join " else " (array.map acc xs)) "
+            }"
+
+        | z -> sys.fail (str.str! "Unknown expression AST node " (str.inspect z))
+
+
+// `And` patterns
+test.assert!
+    let f =
+        | x & Cons y -> y
+        | x -> false
+    f (Cons true)
+
+test.assert!
+    let f =
+        | Cons y & x -> x
+        | x -> false
+    f (Cons true) |> (Cons x -> x)
+
+test.assert!
+    let f =
+        | x & Cons y -> false
+        | x -> true
+    f (Scons false)
+
+test.collect! {}

@@ -1,0 +1,53 @@
+
+module scope =
+
+    js! "
+        let LIST = 1;
+        let STRUCT = 0;
+        let __COMPILE_TIME__ = true;
+    "
+
+    let run_empty_scope = js! "function() {
+        try {
+            return eval(arguments[0]);
+        } catch (e) {
+            console.error('Failed to exec scope');
+            console.error(e);
+            throw e;
+        }
+    }"
+
+    let capture_empty_scope __x __y = js! "(() => {
+        const exports = {};
+        try {
+            eval(__y);
+            if (__x !== '') {
+                global[__x] = exports;
+            }            
+            return exports;
+        } catch (e) {
+            console.error('Failed to capture macro`' + __x + '`\n');
+            console.error(e);
+            try {
+                console.error(require('terser').minify(__y, {
+                    compress: {
+                        passes: 2,
+                        unsafe: true,
+                        sequences: false,
+                        join_vars: false,
+                        toplevel: true,
+                        pure_getters: true
+                    }, 
+                    mangle: opt, 
+                    output: {
+                        beautify: !opt
+                    }
+                }).code);
+            } catch (e) {
+                console.error('Failed to debork');
+                console.error(__y);
+            }
+            throw e;
+        }
+    })()
+    "

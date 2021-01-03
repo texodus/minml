@@ -1,0 +1,506 @@
+use core
+use array
+use macro
+use ref
+use set
+use map
+use sys
+use str
+use pprint
+use test
+use parsec
+
+// type Expression =
+//     | Statement [Expression]
+//     | Symbol String
+//     | String String
+
+// type Pattern =
+//     | StructPattern [Pattern]
+//     | TagPattern {String, Pattern}
+//     | ListPattern [Pattern]
+
+module ast =
+
+    // Handles minml's scope, which is sensitive to whitespace
+    module indent =
+
+        // Run a `Parser p` with a new indentation scope from the current
+        // parser position.  Supercedes (and ignores) the current
+        // indentation scope.
+        // : Parser p -> Parser p
+        let hard p = parsec.run!
+            let (Position new) = parsec.get_pos
+            let old = parsec.get_state
+            parsec.put_state new
+            let result = p
+            parsec.put_state old
+            parsec.return result
+
+        // Run a `Parser p` if the indentation at the current parser
+        // position matches the current indentation scope.
+        // : Parser {}
+        let same = parsec.run!
+            let (Position {_, col}) = parsec.get_pos
+            let {_, old} = parsec.get_state
+            if! col != old then:
+                parsec.fail <| str.str! "Wrong indentation! Expected " old " Got " col
+            else:
+                parsec.return {}
+        
+        // Run a `Parser p` if the indentation at the current parser
+        // position matches or exceeds the current indentation scope.
+        // : Parser {}
+        let more = parsec.run!
+            let (Position {_, col}) = parsec.get_pos
+            let {_, old} = parsec.get_state
+            if! col < old then:
+                parsec.fail <| str.str! "Wrong indentation! Expected " old " Got " col
+            else:
+                parsec.return {}
+
+
+    // Parse 0 or more whitespace characters, including comments.
+    // : Parser {}
+    let whitespace =
+        parsec.regex "((\\/\\/[^\\n]*)|[ \\r\\t\\n])*"
+
+    // Parse 1 or more whitespace characters, including comments.
+    // : Parser {}
+    let whitespace1 =
+        parsec.regex "((\\/\\/[^\\n]*)|[ \\r\\t\\n])+"
+
+    // Parse a symbol string representation.  Will not match on
+    // leading conjunctions, e.g. `token "let"` will not parse the string
+    // `"lettuce"`
+    // : String -> Parser String
+    let token x = parsec.run!
+        let z = parsec.regex "[a-zA-Z_]+"
+        if! z == x then:
+            parsec.return x
+        else:
+            parsec.fail <| str.str! "Token `" x "`"
+
+    // Parse a positive or negative float64 number.
+    // : String -> Parser Float64
+    let number = parsec.run!
+        let minus = parsec.optional (parsec.sym "-")
+        parsec.fmap Number <| match! minus with:
+            | Some _ -> parsec.fmap (x -> 0 - x) <| parsec.number
+            | None {} -> parsec.number
+
+    // Parse an operator.
+    // : String -> Parser String
+    let operator x = parsec.run!
+        let z = parsec.regex "[\\+\\-\\*\\/\\|\\>\\<\\=\\!\\&]+"
+        if! z == x then:
+            parsec.return <| Infix x
+        else:
+            parsec.fail <| str.str! "Operator `" x "`"
+
+    // Parse a unicode literal
+    // : Parser String
+    let unicode = parsec.run!
+        parsec.sym "\\u"
+        let args = parsec.repeat 4 (parsec.regex ".")
+        parsec.return <| js! "String.fromCharCode(parseInt(args.slice(1).join(''), 16))"
+
+    // Parse an encoded String literal.
+    // : Parser Expression
+    let string_expr =
+        let encode x y = parsec.run! 
+            parsec.sym x
+            parsec.return y
+    
+        let escape_char = parsec.or!
+            (encode "\\'" "\'")
+            (encode "\\\"" "\"")
+            (encode "\\\\" "\\")
+            (encode "\\b" "\b")
+            (encode "\\f" "\f")
+            (encode "\\n" "\n")
+            (encode "\\r" "\r")
+            (encode "\\t" "\t")
+            (encode "\\v" "\v")
+            unicode
+
+        let double_char = parsec.run!
+            parsec.not (parsec.or! (parsec.sym "\"") (parsec.sym "\\"))
+            parsec.regexm "."
+
+        parsec.run! 
+            parsec.sym "\""
+            let chars = parsec.many <| parsec.or! double_char escape_char
+            parsec.sym "\""
+            parsec.return << String <| str.join "" chars
+
+    // Parses a minml `Symbol` or `Accessor`
+    // : Parser Expression
+    let symbol_expr =    
+        let keywords = set.from_array ["let", "use", "module"]
+   
+        let rename_map = map.from_array [
+            ["if", "if_"],
+            ["else", "else_"],
+            ["try", "try_"],
+            ["catch", "catch_"],
+            ["return", "return_"],
+            ["new", "new_"],
+            ["class", "class_"],
+            ["do", "do_"]
+        ]
+
+        let rename x =
+            if! map.has x rename_map then: map.get x rename_map else: x
+
+        parsec.run!
+            let sym = parsec.fmap rename <| parsec.regex "[a-z_][a-zA-Z_0-9]*"
+            parsec.not (parsec.sym ":")
+            if! set.has sym keywords then:
+                parsec.fail "Not keyword"
+            else:
+                parsec.run!
+                    let args = parsec.strict_many <| parsec.run!
+                        parsec.sym "."
+                        whitespace
+                        let prop = parsec.fmap rename <| parsec.regex "[a-z_][a-zA-Z_0-9]*"
+                        parsec.return prop
+                    parsec.return <| array.foldr (Symbol sym) ({x, i} -> Accessor {x, i}) args
+
+    let _import_rename x = parsec.run!
+        whitespace1
+        token "as"
+        whitespace1
+        symbol_expr
+        parsec.return x
+
+    let import_expr = parsec.run!
+        token "use"
+        whitespace1
+        let x = symbol_expr
+        whitespace
+        let y = parsec.or! (_import_rename x) (parsec.return x)
+        parsec.return <| Import x
+
+    let module_expr statement_expr = parsec.err_scope "Statement" <| parsec.run!
+        token "module"
+        whitespace1
+        let x = symbol_expr
+        whitespace
+        operator "="
+        whitespace
+        let y = statement_expr
+        parsec.return <| Module {x, y}
+
+    let tag_pattern pattern = parsec.run!
+        let sym = parsec.regex "[A-Z][a-zA-Z0-9_]*"
+        whitespace
+        let arg = pattern {}
+        parsec.return <| TagPattern [sym, arg]
+
+    let ls_pattern open close cons rec = parsec.run!
+        parsec.sym open
+        whitespace
+        let kv = parsec.or! (parsec.fmap (x -> [x]) <| rec {}) (parsec.return [])
+        whitespace
+        let tail = parsec.strict_many <| parsec.run!
+            parsec.sym ","
+            whitespace
+            let s = rec {}
+            whitespace
+            parsec.return s
+        parsec.or! (parsec.sym ",") (parsec.return {})
+        parsec.sym close
+        parsec.return <| cons (array.concat kv tail)
+
+    let list_pattern = ls_pattern "[" "]" ListPattern
+    let struct_pattern = ls_pattern "{" "}" StructPattern
+
+    let parens_patt pattern = parsec.run!
+        parsec.sym "("
+        whitespace
+        let (Pattern p) = pattern {}
+        whitespace
+        parsec.sym ")"
+        parsec.return p
+
+    let pattern_term pattern =
+        parsec.fmap (Pattern) <| parsec.or!
+            (parens_patt pattern)
+            (tag_pattern ({} -> pattern_term pattern))
+            (struct_pattern pattern)
+            (list_pattern pattern)
+            symbol_expr
+            string_expr
+            number
+
+    let pattern2 pattern = parsec.run!
+        let term = pattern_term pattern
+        whitespace
+        let tail = parsec.many <| parsec.run!
+            operator "&"
+            whitespace
+            pattern_term pattern
+        parsec.return <|
+            if! array.length tail > 0 then:
+                Pattern <| AndPattern (array.concat [term] tail)
+            else:
+                term
+
+    let pattern {} = indent.hard <| parsec.run!
+        let term = pattern2 pattern
+        whitespace
+        let tail = parsec.many <| parsec.run!
+            indent.more
+            operator "|"
+            whitespace
+            pattern2 pattern
+        parsec.return <|
+            if! array.length tail > 0 then:
+                Pattern <| OrPattern (array.concat [term] tail)
+            else:
+                term
+
+    let let_expr statement_expr = parsec.run!
+        token "let"
+        whitespace1
+        let patt = parsec.strict_many <| parsec.run!
+            let p = pattern {}
+            whitespace
+            parsec.return p
+        whitespace
+        operator "="
+        whitespace
+        let stmt = statement_expr
+        parsec.return <| Let {array.get 0 patt, array.foldr stmt ({x, i} -> Func {i, x}) (array.reverse (array.drop 1 patt))}
+
+    let func_expr statement_expr = indent.hard <| parsec.run!
+        let head = pattern {}
+        whitespace
+        operator "->"
+        whitespace
+        let tail = statement_expr
+        parsec.return <| Func {head, tail}
+
+    let case_expr statement_expr = indent.hard << parsec.fmap Case << parsec.strict_many1 <| parsec.run!
+        indent.same
+        operator "|"
+        whitespace
+        let f = func_expr statement_expr
+        whitespace
+        parsec.return f
+
+    let list_expr statement_expr = parsec.run!
+        parsec.sym "["
+        whitespace
+        let kv = parsec.or! (parsec.fmap (x -> [x]) <| statement_expr) (parsec.return [])
+        whitespace
+        let tail = parsec.strict_many <| parsec.run!
+            parsec.sym ","
+            whitespace
+            let s = statement_expr
+            whitespace
+            parsec.return s
+        parsec.or! (parsec.sym ",") (parsec.return {})
+        parsec.sym "]"
+        parsec.return <| List (array.concat kv tail)
+
+    let struct_expr statement_expr = parsec.run!
+        parsec.sym "{"
+        whitespace
+        let kv = parsec.or! (parsec.fmap (x -> [x]) <| statement_expr) (parsec.return [])
+        whitespace
+        let tail = parsec.strict_many <| parsec.run!
+            parsec.sym ","
+            whitespace
+            let s = statement_expr
+            whitespace
+            parsec.return s
+        parsec.or! (parsec.sym ",") (parsec.return {})
+        parsec.sym "}"
+        parsec.return <| Struct (array.concat kv tail)
+
+    let tag_expr = parsec.fmap (x -> Tag [x]) <| parsec.regex "[A-Z][a-zA-Z0-9_]*"
+
+    let infix_term statement_expr = 
+        let parens = parsec.run!
+            parsec.sym "("
+            whitespace
+            let x = statement_expr
+            whitespace
+            parsec.sym ")"
+            parsec.return x
+        parsec.or!
+            parens 
+            (struct_expr statement_expr)
+            (list_expr statement_expr)
+            symbol_expr
+            number
+            string_expr
+            tag_expr
+
+    let app_expr statement_expr = parsec.run!
+        let head = infix_term statement_expr
+        let tail = parsec.many <| parsec.run!
+            parsec.regex "[ \\t]+"
+            infix_term statement_expr
+        parsec.return <| array.foldr head Apply tail
+
+    let macro_expr statement_expr = indent.hard <| parsec.run!
+        let sym = symbol_expr
+        parsec.sym "!"
+        whitespace
+        let expr = statement_expr
+        whitespace
+        let tail = parsec.many <| parsec.run!
+            indent.more
+            parsec.regex "[a-zA-Z_]+"
+            parsec.sym ":"
+            whitespace
+            statement_expr
+        parsec.return <| Macro {sym, array.concat [expr] tail}
+
+    let _infix x =
+        | [] -> x
+        | xs -> match! array.get (-1) xs with:
+            | {op, y} -> Apply {Apply {op, _infix x (array.drop (-1) xs)}, y}
+
+    let infix_expr_generic statement_expr =
+        | [] -> parsec.or!
+            (macro_expr statement_expr)
+            (func_expr statement_expr)
+            (case_expr statement_expr)
+            (app_expr statement_expr)
+        | xs ->
+            let op = parsec.run!
+                whitespace
+                let op = xs
+                    |> array.get 0
+                    |> array.map operator
+                    |> array.reverse
+                    |> array.reduce ({x, y} -> parsec.or! y x)
+                    |> (Some x) -> x
+                whitespace
+                parsec.return op
+            let term = infix_expr_generic statement_expr (array.drop 1 xs)
+            let tail = parsec.fmap (x -> y -> [x, y]) op |> parsec.ap term
+            parsec.fmap _infix term |> parsec.ap (parsec.many tail)
+
+    let op_table = macro.matrix!
+        "||" "&&" "<|" "|>" "<<" ">>"
+        "==" "!=" "<=" ">=" "<" ">"
+        "+" "-"
+        "*" "/"
+
+    let statement_expr = indent.hard << parsec.fmap Statement << parsec.strict_many1 <| parsec.run!
+        indent.same
+        let x = parsec.or! 
+            (module_expr statement_expr) 
+            import_expr 
+            (let_expr statement_expr)
+            (case_expr statement_expr)
+            (func_expr statement_expr)
+            (infix_expr_generic statement_expr op_table)
+        whitespace
+        parsec.return x
+
+    let start = parsec.run!
+        whitespace
+        let s = statement_expr
+        whitespace
+        parsec.eol
+        parsec.return s
+
+    let parse = parsec.parse start
+
+test.assert!
+    let tp = parsec.run!
+        ast.indent.same
+        ast.token "test"
+        ast.whitespace1
+        let z = ast.indent.hard <| parsec.run!
+            ast.token "cat"
+            ast.whitespace1
+            ast.indent.same
+            ast.token "test"
+            parsec.return "cat"
+        ast.whitespace1
+        ast.indent.same
+        ast.token "test"
+        parsec.return z
+    "cat" == parsec.parse tp "test\n     cat\n     test\ntest"
+
+test.assert!
+    (pprint.pprint <| ast.parse "let x = y\nx") == "\nlet x = y\nx"
+
+test.assert!
+    (pprint.pprint <| ast.parse "let x = \"Hello, World!\"\nx") == "\nlet x = \"Hello, World!\"\nx"
+
+test.assert!
+    (pprint.pprint <| ast.parse "let x = \" \\r \"\nx") == "\nlet x = \" \\r \"\nx"
+
+test.assert!
+    (pprint.pprint <| ast.parse "let x = \"A\nA\"\nx") == "\nlet x = \"A\\nA\"\nx"
+
+test.assert!
+    (pprint.pprint <| ast.parse "let x = \"\\u001b\" x\nx") == "\nlet x = \"\\u001b\" x\nx"
+
+test.assert!
+    (pprint.pprint <| ast.parse "let x = 12.3\nx") == "\nlet x = 12.3\nx"
+
+test.assert!
+    (pprint.pprint <| ast.parse "let x = f x\nx") == "\nlet x = f x\nx"
+
+test.assert!
+    (pprint.pprint <| ast.parse "let f x = x\nx") == "\nlet f = x -> x\nx"
+
+test.assert!
+    (pprint.pprint <| ast.parse "let f x = do! x\nz") == "\nlet f = x -> do_! x\nz"
+
+test.assert!
+    (pprint.pprint <| ast.parse "let f x = do! x when: x\nz") == "\nlet f = x -> do_! x : x\nz"
+
+test.assert!
+    (pprint.pprint <| ast.parse "let f x = -1\nz") == "\nlet f = x -> -1\nz"
+
+test.assert!
+    (pprint.pprint <| ast.parse "let f (x & y) = -1\nz") == "\nlet f = (x & y) -> -1\nz"
+
+test.assert!
+    (pprint.pprint <| ast.parse "let f (P x) = x\nz") == "\nlet f = (P x) -> x\nz"
+
+test.assert!
+    (pprint.pprint <| ast.parse "let f = x.y\nz") == "\nlet f = x.y\nz"
+
+test.assert!
+    (pprint.pprint <| ast.parse "let f = x.y.z\nz") == "\nlet f = x.y.z\nz"
+
+test.assert!
+    (pprint.pprint <| ast.parse "let (P {x, y}) =x\nz") == "\nlet (P {x, y}) = x\nz"
+
+test.assert!
+
+    let result = pprint.pprint <| ast.parse "
+        use std
+        module test =
+            let (P {}) =
+                X
+
+            let x f (Pattern p) = | (P {}) -> 
+                X
+
+            let (P {}) =
+                | (P {\"test\"}) -> 
+                    let f = f (x + 2) \"test\"
+                    X
+                | (P {x, y, z}) -> x && y >> \"test\" + (12.3 - abc / _test_var) * I
+
+            let (P {}) = {a + b / \"Hello, world!\", X, I + I}
+            let (P {}) = Statement {1, [1,2,3]}
+
+            X
+        X"
+    
+    str.length result > 10 && pprint.pprint (ast.parse result) == result
+
+test.collect! {}

@@ -1,0 +1,20 @@
+use core
+
+module map =
+
+    let _immutable = js! "require('immutable')"
+
+    let from_array x =
+        js! "_immutable.Map(Object.fromEntries(x.slice(1).map(x => x.slice(1))))"
+
+    let merge x y = 
+        js! x ".merge(" y ")"
+
+    let has key m =
+        js! m ".has(" key ")"
+
+    let get key m =
+        js! m ".get(" key ")"
+
+    let set key v m =
+        js! m ".set(" key ", " v ")"

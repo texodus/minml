@@ -1,0 +1,334 @@
+use core
+use array
+use macro
+use ref
+use sys
+use str
+use pprint
+use test
+
+module parsec =
+
+    // type ParserState a = {String, Int, a, String}
+    
+    // type Parser state a = 
+    //     Parser (ParserState state -> Either {ParserState state, String} {ParserState state, a})
+
+    // Helper turns a `Parser a` into it's underlying function
+    // : Parser a -> ParserState state -> Either {ParserState state, String} {ParserState state, a}
+    let unparse (Parser s) = s
+
+    module dsl =
+
+        // `bind` a `Parser b` constructor to the parameterized type of a
+        // `Parser a`.
+        // : (a -> Parser b) -> Parser a -> Parser b
+        let bind f (Parser p) = Parser <| state ->
+            match! p state with:
+            | Right {state, x} -> unparse (f x) state
+            | x -> x
+
+        // A macro for implementing `bind` as minml's default `Statement` semantics,
+        // similar to Haskell's `do` syntax.
+        let run = macro.monad <| quote! bind
+
+    let run = dsl.run
+
+    // Yields the current state of `input`, the remainging string yet to be parsed.
+    // : Parser String
+    let get_input = Parser <| state & {_, _, _, orig} ->
+        Right {state, orig}
+
+    // Yields the current `state`, the developer parameterized state.
+    // : Parser a
+    let get_state = Parser <| state & {_, _, s, _} -> 
+        Right {state, s}
+
+    // Update the current `state`, the developer parameterized state.
+    // : Parser String
+    let put_state s = Parser <| {input, ln, _, orig} ->
+        Right {{input, ln, s, orig}, {}}
+
+    // End-of-line succeeds only if `input` is empty.
+    // : Parser {}
+    let eol = Parser <| state & {input, _, _, _} ->
+        if! input == "" then:
+            Right {state, {}}
+        else:
+            let msg = str.str!
+                "EOL - `" (str.take 50 input) 
+                (if! str.length input > 50 then: "..." else: "") 
+                "`"
+            Left {state, msg}
+
+    // Yields the current `{row, column}` coordinates of the `input` stream relative to
+    // the original.
+    // : Parser (Position {UInt64, UInt64})
+    let get_pos = Parser <| state & {_, ln, _, orig} -> 
+        let parsed = str.take ln orig
+        let split = str.split "\n" parsed
+        let row = array.length split - 1
+        let col = split |> array.get (-1) |> str.length
+        Right {state, Position {row, col}}
+
+    // Annotates a given `Parser a` with a scope name or message for the stack trace
+    // log.
+    // : String -> Parser a -> Parser a
+    let err_scope txt (Parser p) = dsl.run!
+        let (Position {row, col}) = get_pos
+        Parser <| x -> match! p x with:
+            | Left {state, x} -> Left {state, str.str! x "\n  at `" txt "` line " row ", column " col}
+            | x -> x
+
+    // Succeeds only if a given `Parser a` fails.
+    // : Parser a -> Parser {}
+    let not (Parser p) = Parser <| state ->
+        match! p state with:
+        | Right _ -> Left {state, "Not"}
+        | Left _ -> Right {state, {}}
+    
+    let return x = Parser <| state ->
+        Right {state, x}
+    
+    let fail msg = Parser <| state ->
+        Left {state, msg}
+
+    // Parse a given string.  Either matches entirely or fails.
+    let sym x =
+        let len = str.length x
+        Parser <| state & {input, ln, s, orig} ->
+            if! str.take len input == x
+            then: Right {{str.drop len input, ln + len, s, orig}, x}
+            else: Left {state, str.str! "Symbol `" x "` at position " ln}
+    
+    // Maps a function over a parser, `(a -> b) -> Parser a -> Parser b`
+    let fmap f (Parser g) =
+        Parser <| state -> 
+            match! g state with:
+            | Right {state, a} -> Right {state, f a}
+            | x -> x
+
+    // Applicative operator, applies a `Parser (a -> b)` to a `Parser a`, 
+    let ap (Parser g) (Parser f) =
+        Parser <| state -> 
+            match! f state with:
+            | Right {state, x} -> 
+                match! g state with:
+                | Right {state, y} -> Right {state, x y}
+                | x -> x
+            | x -> x
+
+    let or_f fs xs = Parser <| state -> 
+        match! parsec.unparse (array.get 0 xs) state with:
+        | Left {_, msg} ->
+            if! array.length xs == 1 then:
+                Left {state, str.str! msg "; " fs}
+            else:
+                parsec.unparse (or_f (str.str! msg "; " fs) (array.drop 1 xs)) state
+        | x -> x
+
+    let or xs = quote! or_f "" (unquote! macro.vector xs)
+
+    let optional (Parser p) = Parser <| state ->
+        match! p state with:
+        | Left _ -> Right {state, None {}}
+        | Right {state, e} -> Right {state, Some e}
+
+    let _regex reg expr =
+        Parser <| {input, ln, s, orig} ->
+            match! input |> reg (str.str! "^" expr) with:
+            | Some len ->
+                Right {{str.drop len input, len + ln, s, orig}, str.take len input}
+            | None {} -> Left {{input, ln, s, orig}, "Unknown regex"}
+    
+    let regex = _regex str.regex
+    let regexm = _regex str.regexm
+ 
+    // Parse a number
+    // : Parser Float64
+    let number = 
+        fmap (js! "parseFloat") <| regex "[0-9]+(\\.[0-9]+)?"
+
+    // Repeat a `Parser a`, 0 or more times.
+    // TODO fail on consume input
+    // : Parser p -> Parser [p]
+    let many (Parser p) = Parser <| do!
+        let f items state =
+            match! p state with:
+            | Right {state, a} -> 
+                f (array.concat items [a]) state
+            | Left {_, x} -> Right {state, items}
+        f []
+
+    let strict_many (Parser p) = Parser <| do!
+        let f items state = 
+            match! p state with:
+            | Right {state, a} -> 
+                f (array.concat items [a]) state
+            | Left {state2, x} -> 
+                let {a, l, b, c} = state
+                let {d, m, e, g} = state2
+                if! l != m then:
+                    Left {state, "Strict"}
+                else:
+                    Right {state, items}
+        f []
+
+    // Repeate a `Parser a`, 1 or more times.
+    // TODO fail on consume input
+    // : Parser p -> Parser [p]
+    let many1 p = dsl.run!
+        let x = p
+        let xs = many p
+        return <| array.concat [x] xs
+
+    // Repeate a `Parser a`, 1 or more times.
+    // TODO fail on consume input
+    // : Parser p -> Parser [p]
+    let strict_many1 p = dsl.run!
+        let x = p
+        let xs = strict_many p
+        return <| array.concat [x] xs
+
+    // Repeat a `Parser a`, exactly `x` times.
+    // : Int64 -> Parser p -> Parser [p]
+    let repeat x p = 
+        if! x > 0 then:
+            dsl.run!
+                let z = p
+                fmap (x -> array.concat [z] x) <| repeat (x - 1) p
+        else:
+            return []
+
+    // Apply a `Parser a` to `input`.  Fail if this `input`
+    // does not parse.
+    // : Parser p -> String -> p
+    let parse (Parser s) input = 
+        match! s {input, 0, {0, 0}, input} with:
+        | Right {{rest, len, state, orig}, val} -> val
+        | Left {_, msg} -> sys.fail msg
+
+test.assert!
+    let op_table = macro.matrix!
+        "||" "&&" "<|" "|>" "<<" ">>"
+        "==" "!=" "<=" ">=" "<" ">"
+        "+" "-"
+        "*" "/"
+    array.length op_table == 4 && array.length (array.get 0 op_table) == 6
+
+test.assert! "text" == parsec.parse (parsec.sym "text") "text"
+
+test.assert! 
+    let tp = parsec.run!
+        parsec.not (parsec.sym "text")
+        parsec.sym "test"
+        parsec.return "cat"
+    "cat" == parsec.parse tp "test"
+
+test.assert!
+    let tp = parsec.run!
+        parsec.sym "A"
+        let z = parsec.repeat 3 (parsec.sym "Q")
+        parsec.sym "A"
+        parsec.return z
+    parsec.parse tp "AQQQA" == ["Q", "Q", "Q"]
+
+test.assert!
+    let tp = parsec.run!
+        parsec.sym "\n"
+        parsec.repeat 4 <| parsec.regex "."
+    parsec.parse tp "\n1234" == ["1", "2", "3", "4"]
+
+test.assert!
+    let tp = parsec.run!
+        parsec.sym "$"
+        parsec.sym "Q"
+        parsec.return 4
+    parsec.parse tp "$Q" == 4
+
+test.assert! 
+    let tp = parsec.many (parsec.sym "test")
+    let parsed = parsec.parse tp "testtesttest"
+    array.length parsed == 3
+
+test.assert!
+    let tp = parsec.or! (parsec.sym "test") (parsec.sym "car")
+    parsec.parse tp "test" == "test"
+    
+test.assert!
+    let tp = parsec.or! (parsec.sym "test") (parsec.sym "car")
+    parsec.parse tp "car" == "car"
+
+test.assert!
+    let f x = str.str! x "car"
+    let tp = parsec.fmap f <| parsec.sym "test"
+    parsec.parse tp "test" == "testcar"
+
+test.assert!
+    let f x y = str.str! x " + " y
+    let tp = parsec.fmap f <| parsec.sym "test" |> parsec.ap (parsec.sym "car")
+    parsec.parse tp "testcar" == "test + car"
+
+test.assert!
+    let infix x op y = Apply {Apply {Infix op, Symbol x}, Symbol y}
+    let infix_expression = parsec.fmap infix 
+        <| parsec.sym "x"
+        |> parsec.ap (parsec.or! (parsec.sym "+") (parsec.sym "-"))
+        |> parsec.ap (parsec.sym "x")
+    (pprint.pprint <| parsec.parse infix_expression "x+x") == "(x + x)"
+
+test.assert! parsec.parse parsec.number "123.45" == 123.45
+
+test.assert!
+    let infix x =
+        | [] -> Number x
+        | xs -> array.get (-1) xs |> do!
+            | {op, y} -> 
+                let arg1 = xs |> array.drop (-1) |> infix x
+                let arg2 = Number y
+                Apply {Apply {Infix op, arg1}, arg2}
+
+    let tuple x y = [x, y]
+    let tail = parsec.fmap tuple (parsec.or! (parsec.sym "+") (parsec.sym "-")) |>
+        parsec.ap parsec.number
+
+    let infix_expression = parsec.fmap infix parsec.number |> parsec.ap (parsec.many tail)
+    (pprint.pprint <| parsec.parse infix_expression "3+5-5") == "((3 + 5) - 5)"
+
+test.assert! 
+    let tp = parsec.run! 
+        parsec.sym "test" 
+        parsec.sym "test"
+        parsec.get_pos
+    let (Position {_, col}) = parsec.parse tp "testtest"
+    col == 8
+
+test.assert!
+    let tp = parsec.run!
+        let x = parsec.sym "a"
+        parsec.get_pos
+    let (Position {row, col}) = parsec.parse tp "a"
+    row == 0 && col == 1
+
+test.assert!
+    let tp = parsec.run!
+        let _ = parsec.many (parsec.sym "\n")
+        let x = parsec.sym "test"
+        let y = parsec.get_pos
+        let z = parsec.sym "test"
+        parsec.return y
+        
+    let input = "\n\n\ntesttest"
+    let (Position {row, col}) = parsec.parse tp input
+    row == 3 && col == 4
+
+test.assert!
+    let tp = parsec.run!
+        parsec.sym "test"
+        let x = parsec.sym "cat"
+        parsec.sym "test"
+        parsec.return x
+    
+    "cat" == parsec.parse tp "testcattest"
+
+test.collect! {}

@@ -1,0 +1,117 @@
+
+use core
+
+// Functions for working with `Array` types.
+module array =
+
+    // Convert naive JS arrays to minml `Array a`
+    // : JS -> Array a
+    let from_jsarray x =
+        js! "[LIST, ...x]"
+
+    // Return `true` if all elements of a `Array Boolean` is `true`.
+    // : Array Boolean -> Boolean
+    let all xs =
+        js! xs ".slice(1).every(x => x)"
+
+    // Return `true` if any element of a `Array Boolean` is `true`.
+    // : Array Boolean -> Boolean
+    let any xs =
+        js! xs ".slice(1).some(x => x)"
+
+    // Get the langth of an `Array a`.
+    // : Array a -> UInt64
+    let length x =
+        js! "x.length - 1"
+
+    // Fold a function `f` from left to right. 
+    // : a -> ({a, b} -> a) -> [b] -> a
+    let foldr x f xs =
+        js! "xs.slice(1).reduce((a, b) => f([STRUCT, a, b]), x)"
+
+    // Create a new `Array` from the first `i` elements of `x`.
+    // : UInt64 -> Array a -> Array a
+    let take i x = 
+        js! "(i >= 0 ? x.slice(0, i + 1) : [LIST, ...x.slice(x.length + i)])"
+
+    // Create a new `Array` without the first `i` elements of `x`.
+    // : UInt64 -> Array a -> Array a
+    let drop i x = 
+        from_jsarray <| 
+            if! i >= 0 
+            then: (js! "x.slice(i + 1)")
+            else: (js! "x.slice(1, x.length + i)")
+
+    // Concatenate to `Array a`, left to right.
+    // : Array a -> Array a -> Array a
+    let concat x y =
+        js! "x.concat(y.slice(1))"    
+
+    // Map a function `f` over an `Array a`.
+    // : ({a, UInt64} -> b) -> Array a -> Array b
+    let mapi f x =
+        from_jsarray <| js! "x.slice(1).map((y, i) => f([STRUCT, y, i]))"
+
+    // Map a function `f` over an `Array a`.
+    // : (a -> b) -> Array a -> Array b
+    let map f x =
+        from_jsarray (js! "x.slice(1).map(f)")
+
+    // Create a new `Array a` from each element of `x` for which the predicate `f`
+    // returns `true`.
+    // : (a -> Boolean) -> Array a -> Array a
+    let filter f x =
+        from_jsarray (js! "x.slice(1).filter(f)")
+
+    // Concatenate an `Array` of `Array`s.
+    // : [[a]] -> [a]
+    let flat x =
+        from_jsarray (js! "x.slice(1).map(y => y.slice(1)).flat(1)")
+    
+    // Reverse an `Array`.
+    // : [a] -> [a]
+    let reverse x =
+        from_jsarray <| js! "x.slice(1).reverse()"
+
+    // `map` a function which produces `[a]`, then `flat` the resulting `Array`.
+    // : (a -> [b]) -> [a] -> [b]
+    let flatmap f x =
+        flat <| from_jsarray (js! "x.slice(1).map(f)")
+
+    // Get the item at index `i`.
+    // : UInt64 -> [a] -> a
+    let get i x =
+        let idx = 
+            if! i >= 0
+            then: i + 1
+            else: (length x + 1) + i
+        js! x "[" idx "]"
+
+    // : a -> [a] -> [a]
+    let push x xs =
+        let new_xs = js! xs ".slice()"
+        js! new_xs ".push(" x ")"
+        new_xs
+
+    // : a -> [a] -> [a]
+    let unshift x xs =
+        let new_xs = js! xs ".slice(1)"
+        js! new_xs ".unshift(" x ")"
+        js! new_xs ".unshift(LIST)"
+        new_xs
+
+    // : ({a, a} -> a) -> [a] -> Option a
+    let reduce f xs =
+        if! length xs == 0 then:
+            None {}
+        else:
+            array.drop 1 xs 
+            |> foldr (array.get 0 xs) f 
+            |> Some
+
+    // : [a] -> Seq a
+    let toSeq xs = Seq <| {} -> 
+        if! array.length xs > 0 then:
+            Cons {array.get 0 xs, toSeq (array.drop 1 xs)}
+        else:
+            Nil {}

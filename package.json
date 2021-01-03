@@ -1,0 +1,85 @@
+{
+    "name": "minml",
+    "author": "texodus",
+    "version": "0.0.1",
+    "license": "MIT",
+    "categories": [
+        "Programming Languages"
+    ],
+    "contributes": {
+        "languages": [
+            {
+                "id": "minml",
+                "aliases": [
+                    "minml",
+                    "minml"
+                ],
+                "extensions": [
+                    ".minml"
+                ],
+                "configuration": "./language-configuration.json"
+            }
+        ],
+        "grammars": [
+            {
+                "language": "minml",
+                "scopeName": "source.minml",
+                "path": "./minml.tmLanguage.json"
+            }
+        ]
+    },
+    "engines": {
+        "vscode": "^1.51.0"
+    },
+    "files": [
+        "dist/**/*",
+        "src/**/*"
+    ],
+    "minml": [
+        "src/core.minml",
+        "src/scope.minml",
+        "src/array.minml",
+        "src/seq.minml",
+        "src/macro.minml",
+        "src/set.minml",
+        "src/map.minml",
+        "src/sys.minml",
+        "src/ref.minml",
+        "src/str.minml",
+        "src/term.minml",
+        "src/pprint.minml",
+        "src/test.minml",
+        "src/parsec.minml",
+        "src/ast.minml",
+        "src/typecheck.minml",
+        "src/compiler.minml",
+        "src/index.minml",
+        "src/tetris.minml"
+    ],
+    "scripts": {
+        "build": "yarn unboot && yarn boot",
+        "prod": "node dist/index.js --optimize -o dist",
+        "boot": "TEST=1 node dist/index.js -o dist",
+        "boot2": "yarn boot && yarn boot",
+        "boot3": "yarn boot && yarn boot && yarn boot",
+        "unboot": "cp -R node_modules/minml/dist/ dist",
+        "dev": "webpack serve"
+    },
+    "dependencies": {
+        "babel-eslint": "^10.1.0",
+        "eslint": "^7.3.1",
+        "eslint-plugin-prettier": "^3.1.4",
+        "generator-code": "^1.3.7",
+        "html-webpack-plugin": "^4.5.0",
+        "immutable": "^4.0.0-rc.12",
+        "prettier": "^2.0.5",
+        "terser": "=4.8.0",
+        "webpack": "^5.9.0",
+        "webpack-cli": "^4.2.0",
+        "webpack-dev-server": "^3.11.0",
+        "yo": "^3.1.1"
+    },
+    "devDependencies": {
+        "minml": "0.0.1"
+    }
+}

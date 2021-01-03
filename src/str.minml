@@ -1,0 +1,86 @@
+use core
+use array
+
+// String functions.
+module str =
+
+    let join sep x =
+        js! x ".slice(1).join(" sep ")"
+
+    let inspect x =
+        js! "require('util').inspect(" x ", false, null, true)"
+
+    let coerce x =
+        js! "typeof " x " !== 'string' ? JSON.stringify(" x ") : " x
+
+    let stringify x =
+        js! "JSON.stringify(x)"
+
+    let take x y = 
+        js! "y.slice(0, x)"
+
+    let drop x y = 
+        js! "y.slice(x)"
+
+    let length x = 
+        js! "x.length"
+
+    let get x y = 
+        js! y "[" x "]"
+
+    let split x y = 
+        array.from_jsarray <| js! y ".split(" x ")"
+
+    let repeat n x = 
+        join "" << array.from_jsarray <| js! "Array(n).fill(x)"
+
+    let _regex flags expr txt =
+        let reg = js! "new RegExp(" expr ", " flags ")"
+        let m = js! reg ".exec(" txt ")"
+        if! m != null then:
+            Some (length <| js! m "[0]")
+        else:
+            None {}
+
+    let regex = _regex ""
+    let regexm = _regex "m"
+
+    let replace x y z =
+        js! z ".replace(" x ", " y ")"
+
+    // Template a syntactic block of string fragments and string-ables
+    // TODO This implementation relies on a hacky coincidence, that the
+    //   sentinel value for `LIST` is 1 character long.  If this were
+    //   not so, slicing before (array) or after (string) the join will
+    //   change the answer!  Writing it in this strange way, however, triggers
+    //   the `terser` heuristic which inlines this `join()` call to `+`.
+    let str x =
+        let fix =
+            | Statement [x] -> Statement [fix x]
+            | String z -> String z
+            | z -> quote! coerce (unquote! z)
+        let (List q) = macro.vector x
+        quote! js! (unquote! List (array.map fix q)) ".join('').slice(1)"
+
+    // // Succint version which inlines poorly
+
+    // let str x = quote! 
+    //     str.join "" (unquote! macro.vector x)
+
+    // // Pure minml version which inlines well but is verbose AF
+
+    // let str =
+    //     let _inline p q =
+    //         quote! js! "[" (unquote! p) ", " (unquote! q) "].join('')"            
+    //     | Statement [Apply {f, y}] ->
+    //         let p = str (Statement [f])
+    //         let q = str (Statement [y])
+    //         _inline p q
+    //     | Statement [String z] -> 
+    //         Statement [String z]
+    //     | Statement [z] -> 
+    //         quote! str.coerce (unquote! z)
+    //     | Statement z ->
+    //         let p = str (Statement [array.get 0 z])
+    //         let q = str (Statement (array.drop 1 z))
+    //         _inline p q

@@ -1,0 +1,363 @@
+use core
+use array
+use macro
+use ref
+use seq
+use sys
+use str
+use test
+use pprint
+
+// Integer to hex string
+let hex x = js! x ".toString(16)"
+
+// floor()
+let floor x = js! "Math.floor(" x ")"
+
+// Exponent
+let pow x y = js! "Math.pow(" x ", " y ")"
+
+// y-combinator
+let yc f z = f (yc f) z
+
+
+// A simple library for interfacing with the DOM.
+module html =
+
+    // Set `innerHTML`
+    let write x =
+        js! "document.body.innerHTML = " x
+
+    // Create a new `<style>` in `<head>` from a `String`
+    let style x =
+        let el = js! "document.createElement('style')"
+        js! "el.textContent = " x
+        js! "document.head.appendChild(" el ")"
+
+    // Invoke `handler` with an `UInt32` key code when a `keydown` event is handled.
+    let key_input handler =
+        js! "document.body.addEventListener('keydown', x => handler(x.keyCode))"
+
+    // Invoke `handler` in `ms` milliseconds.
+    let timeout ms handler =
+        js! "setTimeout(" handler ", " ms ")"
+
+    // A specialized `str.str` macro for minimized CSS.
+    let css x =
+        let fix =
+            | Statement [x] -> Statement [fix x]
+            | String z -> String (js! z ".replace(/[ \\r\\t\\n]+/gm, ' ')")
+            | z -> z
+        let (List q) = macro.vector x
+        str.str <| Statement (array.map fix q)
+
+
+// Tetris game logic library
+module tetris =
+
+    // The available game pieces, in no particular order. 
+    // : [Piece]
+    let pieces = macro.vector!
+        macro.matrix!
+            1 0
+            1 0
+            1 1
+            
+        macro.matrix!
+            0 1
+            0 1
+            1 1
+
+        macro.matrix!
+            0 1 0
+            1 1 1
+
+        macro.matrix!
+            1 1 1 1
+
+        macro.matrix!
+            1 1 0
+            0 1 1
+    
+        macro.matrix!
+            0 1 1
+            1 1 0
+
+        macro.matrix!
+            1 1
+            1 1
+   
+    test.assert!
+        array.get 0 pieces == [[1, 0], [1, 0], [1, 1]]
+ 
+
+    // Game `State` library.
+    module state =
+    
+        // Convert a piece to the same shape, but in a random new color.
+        // : Piece -> Piece
+        let random_color piece =
+            let new_color = sys.randint {1, 4}
+            array.map (array.map (x -> if! x > 0 then: new_color else: 0)) piece
+
+        // Return a randomly selected `Piece` from the available game pieces.
+        // : {} -> Piece
+        let random_piece {} =
+            random_color <| array.get (sys.randint {0, array.length pieces}) pieces
+
+        // Returns a `Piece`, rotated clockwise
+        // : Piece -> Piece
+        let rotate_piece piece =
+            let first = array.get 0 piece
+            flip array.mapi first <| {x, i} -> 
+                flip array.mapi piece <| {y, j} -> piece 
+                    |> array.get (array.length piece - j - 1) 
+                    |> array.get i
+
+        // Return a new game `State`.
+        // : {} -> State
+        let new {} =
+            let board = seq.repeat 0 
+                |> seq.take 10 
+                |> seq.toArray 
+                |> seq.repeat 
+                |> seq.take 20 
+                |> seq.toArray
+            {board, {0, 3}, random_piece {}, 0}
+
+        // Get the current Score, Level and Timeout (in ms) from `State`.
+        // : State -> {UInt64, UInt64, UInt64}
+        let get_score {_, _, _, score} = 
+            let level = floor <| score / 3
+            let timeout = 1000 * pow 0.8 level
+            {score, level, timeout}
+
+        // Is the `State` valid?  `true` if the current `Piece` and `Position` do not
+        // overlap any non-zero cells in the current `Board`, nor the `Board` edges.
+        // : State -> Boolean
+        let is_valid {board, {cur_ridx, cur_cidx}, piece, _} =
+            let conflicts = flip array.mapi piece <| {row, ridx} -> 
+                flip array.mapi row <| {cell, cidx} ->
+                    let r = ridx + cur_ridx
+                    let c = cidx + cur_cidx
+                    if! r < 0 || r > 19 || c < 0 || c > 9 then: true else:
+                        let board_cell = board |> array.get r |> array.get c
+                        cell > 0 && board_cell > 0
+            not <| array.any (array.map array.any conflicts)
+
+        // Reduce a `Board`, removing any rows where all `Cell`s are non-zero and
+        // shifting subsequent rows down.  Returns the new `Board`, and also score
+        // accumulated for this clear.
+        // : Board -> {Board, UInt8}
+        let clear_board =
+            | [] -> {[], 0}
+            | xs ->
+                let last = array.get (-1) xs
+                let {rest, total} = clear_board (array.drop (-1) xs)
+                if! array.all (array.map (z -> z > 0) last) then:
+                    let new_row = seq.repeat 0 |> seq.take 10 |> seq.toArray
+                    {array.unshift new_row rest, total + 1}
+                else:
+                    {array.push last rest, total}
+
+        // Get the `UInt32` value of a cell at row `ridx`, column `cidx`, of the
+        // composited `Board` and `Piece`.
+        // : Position -> Piece -> UInt32 -> UInt32 -> UInt64 -> UInt64
+        let get_cell {cur_ridx, cur_cidx} piece ridx cidx cell  =
+            let max_row = array.length piece
+            let max_col = array.length (array.get 0 piece)
+            let row_span = ridx >= cur_ridx && ridx < cur_ridx + max_row
+            let col_span = cidx >= cur_cidx && cidx < cur_cidx + max_col
+            if! row_span && col_span then:
+                let v = piece
+                    |> array.get (ridx - cur_ridx)
+                    |> array.get (cidx - cur_cidx)
+                if! v > 0 then: v else: cell
+            else: 
+                cell
+                    
+        // Apply the current game `State`'s `Piece` to the `Board` and reset `Piece`
+        // and `Position`.
+        // : State -> State
+        let apply_state {board, pos, piece, score} =
+            let new_board = flip array.mapi board <| {row, ridx} -> 
+                flip array.mapi row <| {cell, cidx} ->
+                    get_cell pos piece ridx cidx cell
+            let {b, new_score} = clear_board new_board
+            {b, {0, 3}, random_piece {}, score + new_score}
+
+        // Increment the current state 1 tick.
+        // : State -> State
+        let tick_state {state, {r, c}, piece, score} =
+            let new_state = {state, {r + 1, c}, piece, score}
+            if! is_valid new_state then:
+                new_state
+            else:
+                apply_state {state, {r, c}, piece, score}
+
+        // Increment the current state until `is_valid` returns false, then
+        // `apply_state`
+        // : State -> State
+        let drop_state {state, {r, c}, piece, score} =
+            let new_state = {state, {r + 1, c}, piece, score}
+            if! is_valid new_state then:
+                drop_state new_state
+            else:
+                apply_state {state, {r, c}, piece, score}
+
+        // Increment the current state 1 tick.
+        // : State -> State
+        let input_state keycode {state, {r, c}, piece, score} = 
+            let new_state = match! keycode with:
+                | 37 -> {state, {r, c - 1}, piece, score}
+                | 39 -> {state, {r, c + 1}, piece, score}
+                | 38 -> {state, {r, c}, rotate_piece piece, score}
+                | 40 -> tick_state {state, {r, c}, piece, score}
+                | x -> sys.fail <| str.str! "Unknown input " x
+            if! is_valid new_state
+            then: new_state
+            else: {state, {r, c}, piece, score}
+
+
+    test.assert!
+        (state.random_piece {} |> array.get 0 |> array.length) > 1
+
+    test.describe! "rotate_piece() asymmetric tests" with:
+
+        let piece1 = macro.matrix!
+            1 0 1 1
+            0 1 1 0
+            0 0 1 1
+
+        test.assert!
+            let rotated = piece1
+                |> state.rotate_piece
+                |> state.rotate_piece
+                |> state.rotate_piece
+                |> state.rotate_piece
+
+            piece1 == rotated
+
+        test.assert!
+            let rotated = piece1
+                |> state.rotate_piece
+                |> state.rotate_piece
+                |> state.rotate_piece
+
+            piece1 != rotated
+
+    test.describe! "rotate_piece() symmetric tests" with:
+
+        let piece2 = macro.matrix!
+            1 0 0
+            0 1 0
+            0 0 1
+
+        test.assert!
+            let rotated = piece2 |> state.rotate_piece
+            piece2 != rotated
+
+        test.assert!
+            let rotated = piece2 |> state.rotate_piece |> state.rotate_piece
+            piece2 == rotated
+
+    test.assert!
+        (state.random_piece {} |> array.get 0 |> array.length) > 1
+
+    test.assert!
+        let {board, _, _} = state.new {}
+        array.length board == 20
+
+
+    // Tetris interface library, which renders the game `State`.
+    module gui =
+
+        // Draw a single cell of the current game `State`.
+        // : State -> UInt64 -> {[UInt8], UInt64} -> String
+        let draw_cell {pos, piece} ridx {cell, cidx} =
+            let new_cell = state.get_cell pos piece ridx cidx cell            
+            str.str! "<td value='" new_cell "'></td>"
+            
+        // Draw a single row of current game `State`.
+        // : State -> {[UInt8], UInt64} -> String
+        let draw_row st {row, ridx} =
+            str.str! "<tr>" (str.join "" <| array.mapi (draw_cell st ridx) row) "</tr>"
+
+        // Draw the current game `State`, as an HTML `<table>`
+        // : State -> String
+        let draw {state, cursor, piece, score} = 
+            let rows = array.mapi (draw_row {cursor, piece}) state
+            str.str! 
+                "<table>" (str.join "" rows) "</table>"
+                "<h3>Score " (score * 100) "</h3>"
+
+
+    test.assert!
+        str.length (gui.draw <| state.new {}) > 100
+
+
+    // Game CSS Theme library
+    module theme =
+
+        // Base CSS, which styles the score box, board, and tetrinomino blocks
+        // themselves.
+        // : String
+        let base = html.css! "
+            table {
+                border: 1px solid #aaa;
+            }
+            h3 {
+                font-family: Monospace;
+                color: #999
+            }
+            td {
+                width: 25px;
+                height: 25px;
+                background-color: white;
+                border: 1px solid #eee;
+            }"
+
+        // Generate a random color in hex-string form.
+        // : {} -> String
+        let random_color _ =
+            let r = hex <| sys.randint {127, 255}
+            let g = hex <| sys.randint {127, 255}
+            let b = hex <| sys.randint {127, 255}
+            str.str! "#" r g b
+
+        // Template for a CSS rule for a single `<td>` element.
+        // : {String, UInt64} -> String
+        let template_row {x, i} =
+            html.css! "
+                td[value='" i "'] {
+                    background-color: " x ";
+                }"
+
+        // Generate a random theme as a CSS `String`.
+        // : {} -> String
+        let generate {} = seq.repeat 0
+            |> seq.take 10
+            |> seq.toArray
+            |> array.map random_color
+            |> array.mapi template_row
+            |> array.drop 1
+            |> str.join ""
+
+
+let main {} =
+    html.style tetris.theme.base
+    html.style (tetris.theme.generate {})
+    let state = ref.new <| tetris.state.new {}
+    html.write <| tetris.gui.draw (ref.get state)
+
+    html.timeout 1000 << yc <| rec -> {} ->
+        ref.apply tetris.state.tick_state state
+        html.write <| tetris.gui.draw (ref.get state)
+        let {_, _, timeout} = tetris.state.get_score <| ref.get state
+        html.timeout timeout rec
+
+    html.key_input <| keycode -> 
+        ref.apply (tetris.state.input_state keycode) state
+        html.write <| tetris.gui.draw (ref.get state)
+
+test.collect! {}

@@ -1,0 +1,21 @@
+use core
+use array
+
+module seq =
+
+    // type Seq a = Seq ({} -> Cons {a, Seq a} | Nil {})
+    let unseq (Seq a) = a
+
+    let repeat x = 
+        Seq <| {} -> Cons {x, repeat x}
+        
+    let take =
+        | 0 -> _ -> Seq <| {} -> Nil {}
+        | n -> seq -> Seq <| {} -> 
+            match! unseq seq {} with:
+            | Cons {x, seq} -> Cons {x, take (n - 1) seq}
+            | x -> x
+
+    let toArray seq = match! unseq seq {} with:
+        | Cons {a, seq} -> array.push a (toArray seq)
+        | Nil {} -> []

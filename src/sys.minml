@@ -1,0 +1,33 @@
+use core
+use array
+
+// Control, file system, environment, OS, etc.. functions.
+module sys =
+    let is_browser = js! "process.env.APP_ENV === 'browser'"
+
+    let env x = js! "process.env[" x "]"
+    let log x = js! "console.log(" x ") || " x
+    let out x = js! "process.stdout.write(" x ")"
+    let fail x = js! "(function() { throw " x "; })()"
+    let is_macro_time _ = quote! js! "typeof __COMPILE_TIME__ !== 'undefined'"
+    let randint {x, y} = js! "Math.floor(Math.random() * (y - x) + x)"
+
+    let argv = 
+        if! is_browser
+        then: []
+        else: array.from_jsarray (js! "process.argv.slice(2)")
+
+    let _fs =
+        if! is_browser
+        then: {}
+        else: js! "require('fs')"
+
+    let read_file x = js! "_fs.readFileSync(" x ").toString()"
+    let write_file filename x = js! "_fs.writeFileSync(" filename ", " x ")"
+
+    // A basic `if` statement
+    let cond =
+        | Statement [f, x, y] ->
+            quote! js! "(" (unquote! f) "?" (unquote! x) ":" (unquote! y) ")"
+        | Statement [Apply {Apply {f, x}, y}] ->
+            quote! js! "(" (unquote! f) "?" (unquote! x) ":" (unquote! y) ")"

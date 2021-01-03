@@ -1,0 +1,205 @@
+use core
+use array
+use macro
+use ref
+use seq
+use map
+use set
+use sys
+use str
+use term
+use pprint
+
+module test =
+
+    let failures = ref.new 0
+    let successes = ref.new 0
+    let skipped = ref.new 0
+
+    // Asserts a boolean expression, which can be reflected to console on
+    // failure via macro.
+    let _assert y =
+        | x -> 
+            if! sys.env "TEST" then: quote! 
+                if! (sys.is_macro_time! {}) then:
+                    let result =
+                        try!
+                            unquote! x
+                        catch: q ->
+                            sys.log q
+                            false
+                    if! result then:
+                        sys.out <| term.green! "\u2713"
+                        ref.apply (x -> x + 1) successes
+                    else:
+                        ref.apply (x -> x + 1) failures
+                        sys.out <| str.str! 
+                            term.red! "X\n"
+                            unquote! String (pprint.tprint y)
+                            "\n\n"
+                else: {}
+            else: quote! {}
+
+    let assert x = _assert x x
+
+    let describe _ x = quote!
+        if! (sys.is_macro_time! {}) then:
+            unquote! x
+        else:
+            {}
+
+    let assert_fail x = _assert x <| quote!
+        try!
+            unquote! x
+            false
+        catch: e -> 
+            true
+
+    let skip x =
+        if! sys.env "TEST" then: quote!
+            if! (sys.is_macro_time! {}) then:
+                ref.apply (x -> x + 1) skipped
+                sys.out <| term.yellow! "O"
+            else: {}
+        else: quote! {}
+
+    let collect _ =
+        if! sys.env "TEST" then: quote! 
+            if! (sys.is_macro_time! {}) then:
+                if! ref.get failures > 0 then:
+                    sys.log <| str.str! 
+                        "\n" (ref.get successes)
+                        "/" (ref.get successes + ref.get failures + ref.get skipped)
+                        " tests completed"
+                else:
+                    sys.log <| str.str! 
+                    "\n" (ref.get successes)
+                    " tests completed"
+                successes |> ref.set 0
+                failures |> ref.set 0
+
+            else:
+                {}
+        else: quote! {}
+
+// array tests
+
+test.assert! (array.drop 2 [1,2,3,4,5]) == [3,4,5]
+test.assert! (array.drop (-2) [1,2,3,4,5]) == [1,2,3]
+
+test.assert! (array.concat [1,2] [3,4,5]) == [1,2,3,4,5]
+test.assert! (array.concat [] [3,4,5]) == [3,4,5]
+test.assert! (array.concat [1,2] []) == [1,2]
+test.assert! (array.concat [] []) == []
+
+test.assert! (array.from_jsarray (js! "[1,2,3]")) == [1,2,3]
+test.assert! (array.from_jsarray (js! "[]")) == []
+
+test.assert! ([1] |> array.map (x -> x + 1)) == [2]
+test.assert! ([] |> array.map (x -> x + 1)) == []
+test.assert! ([1,2,3,4] |> array.map (x -> str.str! x)) == ["1", "2", "3", "4"]
+
+test.assert! array.map (x -> x) [[1,2,3],[4,5]] == [[1,2,3],[4,5]]
+
+test.assert! ([1,2,3,4] |> array.mapi ({x, i} -> 4 - i)) == [4,3,2,1]
+test.assert! ([1,2,3,4] |> array.mapi ({x, i} -> str.str! x " : " i)) == ["1 : 0", "2 : 1", "3 : 2", "4 : 3"]
+
+test.assert! ([1,2,3,4] |> array.filter (x -> x > 2)) == [3,4]
+test.assert! ([1,2,3,4] |> array.filter (x -> x < 3)) == [1,2]
+test.assert! ([1,2,3,4] |> array.filter (x -> x > 4)) == []
+
+test.assert! array.flat [[1,2,3],[4,5,6]] == [1,2,3,4,5,6]
+
+test.assert! ([1,2,3,4] |> array.flatmap (x -> [x, 5 - x])) == [1, 4, 2, 3, 3, 2, 4, 1]
+
+test.assert! array.drop 0 [1,2,3] == [1,2,3]
+test.assert! array.drop 1 [1,2,3] == [2,3]
+test.assert! array.drop 3 [1,2,3] == []
+test.assert! array.drop 4 [1,2,3] == []
+
+test.assert! array.get 0 [1,2,3] == 1
+test.assert! array.get 1 [1,2,3] == 2
+test.assert! array.get (-1) [1,2,3] == 3
+test.assert! (array.get (-1) <| array.drop (-1) [1,2,3]) == 2
+
+test.assert! 
+    let f {st, val} = str.str! st ": " val
+    array.foldr "" f [1,2,3,4,5] == ": 1: 2: 3: 4: 5"
+
+test.assert! array.reduce ({x, y} -> x + y) [1,2,3,4,5] == Some 15
+test.assert! array.reduce ({x, y} -> x + y) [1] == Some 1
+test.assert! array.reduce ({x, y} -> x + y) [] == None {}
+
+test.assert! set.has 2 (set.from_array [1,2,3])
+test.assert! not (set.has 4 (set.from_array [1,2,3]))
+
+test.assert! array.push 3 [1,2] == [1,2,3]
+
+test.assert! array.take 2 [1,2,3,4] == [1,2]
+test.assert! array.take (-2) [1,2,3,4] == [3,4]
+
+
+// seq tests
+
+test.assert!
+    (seq.repeat 10 |> seq.take 3 |> seq.toArray) == [10, 10, 10]
+
+// str tests
+
+test.assert! str.join "+" ["a", "b", "c"] == "a+b+c"
+test.assert! str.join "+" [] == ""
+
+test.assert! str.take 3 "test" == "tes"
+test.assert! str.drop 2 "test" == "st"
+
+test.assert!
+    let m = map.from_array [["a", 1], ["b", 2]]
+    map.get "a" m == 1
+
+// core.fs tests
+
+test.assert!
+    let f x = x + 1
+    4 == (3 |> y -> f y)
+
+test.assert! 
+    let f x = x + 1
+    4 == (y -> y |> f) 3
+
+test.assert! 
+    let f x = x + 1
+    let g x = x + 2
+    (f >> g) 3 == 6
+
+test.assert!
+    try!
+        sys.fail "Never works!"
+        false
+    catch: e ->
+        true
+
+test.assert!
+    if! 3 < 4 then: 
+        true
+    else:
+        sys.fail "False!"
+        false
+
+test.assert!
+    if! 3 > 4 then:
+        sys.fail "False!"
+        false
+    else:
+        true
+
+test.assert!
+    let y = ref.new 0
+    for_each! [1,2,3,4] do: x -> ref.apply (z -> x + z) y
+    ref.get y == 10
+
+test.assert!
+    let y = ref.new 0
+    for_each! [1,2,3,4] do: {x, i} -> ref.apply (z -> x + z + i) y
+    ref.get y == 16
+
+test.collect! {}

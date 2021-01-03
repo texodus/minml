@@ -1,0 +1,11 @@
+use core
+
+module ref =
+
+    let new x = Ref x
+
+    let get (Ref x) = x
+
+    let set y x = js! x "[1] = " y
+
+    let apply f x = set (f <| get x) x

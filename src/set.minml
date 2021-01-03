@@ -1,0 +1,19 @@
+use core
+
+module set =
+
+    let _immutable =
+        js! "require('immutable')"
+
+    let from_array x =
+        js! "_immutable.Set(" x ".slice(1))"
+
+    let has x s =
+        js! "s.has(" x ")"
+
+    let add x s =
+        js! s ".add(" x ")"
+
+    let union x y =
+        js! x ".union(" y ")"
+    

@@ -1,0 +1,125 @@
+
+let try x y = quote! 
+    js! "(() => { 
+        try {
+            return " (unquote! x) ";
+        } catch (e) { 
+            return (" (unquote! y) ")(e); 
+        }
+    })()"
+
+let call_later f = quote! js! "setTimeout(() => " (unquote! f) ")"
+
+let inline x = quote! js! "/*@__INLINE__*/ " (unquote! x)
+
+let if x y z = quote! js! "(" (unquote! x) " ? " (unquote! y) " : " (unquote! z) ")"
+
+let for_each x =
+    | Statement [Func {Pattern (StructPattern [patt, ipatt]), body}] -> quote! js! "(() => {
+        let __x = " (unquote! x) ".slice(1);
+        for (let __z = 0; __z < __x.length; __z++) {
+            let __y = __x[__z];
+            " (unquote! Let {patt, quote! js! "__y"}) ";
+            " (unquote! Let {ipatt, quote! js! "__z"}) ";
+            " (unquote! body) ";
+        }
+        })()"
+    | Statement [Func {patt, body}] -> quote! js! "(() => {
+        for (let __z of " (unquote! x) ".slice(1)) {
+            " (unquote! Let {patt, quote! js! "__z"}) ";
+            " (unquote! body) ";
+        }
+        })()"
+
+    | x -> js! "console.log(x)"
+
+let not x = js! "!x"
+
+let do x = x
+
+let flip f x y = f y x
+
+let match x y = quote! js! "(" (unquote! y) ")(" (unquote! x) ")"
+
+let eq = 
+
+    js! "(() => {
+        var envHasBigInt64Array = typeof BigInt64Array !== 'undefined';
+
+        return function equal(a, b) {
+            if (a === b) {
+                return true;
+            }
+
+            if (a && b && typeof a == 'object' && typeof b == 'object') {
+                if (a.constructor !== b.constructor) {
+                    return false;
+                }
+
+                var length, i, keys;
+                if (Array.isArray(a)) {
+                    length = a.length;
+                    if (length != b.length) return false;
+                    for (i = length; i-- !== 0;)
+                        if (!equal(a[i], b[i])) return false;
+                    return true;
+                }
+
+                if ((a instanceof Map) && (b instanceof Map)) {
+                    if (a.size !== b.size) return false;
+                    for (i of a.entries())
+                        if (!b.has(i[0])) return false;
+                    for (i of a.entries())
+                        if (!equal(i[1], b.get(i[0]))) return false;
+                    return true;
+                }
+
+                if ((a instanceof Set) && (b instanceof Set)) {
+                    if (a.size !== b.size) return false;
+                    for (i of a.entries())
+                        if (!b.has(i[0])) return false;
+                    return true;
+                }
+
+                if (ArrayBuffer.isView(a) && ArrayBuffer.isView(b)) {
+                    length = a.length;
+                    if (length != b.length) return false;
+                    for (i = length; i-- !== 0;)
+                        if (a[i] !== b[i]) return false;
+                    return true;
+                }
+
+                if (a.constructor === RegExp) {
+                    return a.source === b.source && a.flags === b.flags;
+                }
+
+                if (a.valueOf !== Object.prototype.valueOf) {
+                    return a.valueOf() === b.valueOf();
+                }
+
+                if (a.toString !== Object.prototype.toString) {
+                    return a.toString() === b.toString();
+                }
+
+                keys = Object.keys(a);
+                length = keys.length;
+                if (length !== Object.keys(b).length) {
+                    return false;
+                }
+
+                for (i = length; i-- !== 0;) {
+                    if (!Object.prototype.hasOwnProperty.call(b, keys[i])) {
+                        return false;
+                    }
+                }
+
+                for (i = length; i-- !== 0;) {
+                    var key = keys[i];
+                    if (!equal(a[key], b[key])) return false;
+                }
+
+                return true;
+            }
+            return a!==a && b!==b;
+        };
+    })();"

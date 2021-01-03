@@ -1,0 +1,24 @@
+use core
+use array
+
+module macro =
+    let _matrix f (Statement xs) =
+        let _row =
+            | Apply {f, x} -> array.concat (_row f) [x]
+            | x -> [x]
+        List <| f _row xs
+
+    let matrix = _matrix (x -> array.map (List << x))
+    let vector = _matrix array.flatmap
+
+    let statement f =
+        | Statement [x] -> x
+        | Statement xs ->
+            let rest = Statement (array.drop 1 xs)
+            f {statement f rest, array.get 0 xs}
+
+    let monad bind = statement <| do!
+        | {rec, Let {patt, fbody}} -> quote!
+            (unquote! bind) (unquote! Func {patt, rec}) (unquote! fbody)
+        | {rec, x} -> quote!
+            (unquote! bind) (unquote! Func {Pattern (Symbol "_"), rec}) (unquote! x)

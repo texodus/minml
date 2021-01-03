@@ -1,0 +1,17 @@
+jobs:
+  install-node-example:
+    docker:
+      - image: 'cimg/base:stable'
+    steps:
+      - checkout
+      - node/install:
+          install-yarn: true
+          node-version: 15.2.1
+      - run: yarn && yarn build && yarn boot
+orbs:
+  node: circleci/node@4.0.0
+version: 2.1
+workflows:
+  test_my_app:
+    jobs:
+      - install-node-example
